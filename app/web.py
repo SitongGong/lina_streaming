@@ -816,6 +816,31 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(e)}), 500
         return jsonify({"ok": True, "text": text})
 
+    @app.route("/api/voice/say", methods=["POST"])
+    def voice_say():
+        """Synthesize arbitrary text to speech — used by the per-message replay
+        (🔊) button. Re-synthesizes from the stored message text + its mood, so
+        it works for any assistant message: live, text-typed, or loaded from
+        history. Returns a single WAV. Gated on a connected client to avoid
+        anonymous GPU abuse on a public endpoint."""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
+        ve = get_voice_engine()
+        if ve.status()["state"] != "ready":
+            return jsonify({"ok": False, "error": "语音模型尚未就绪。"}), 409
+        data = request.get_json(force=True, silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"ok": False, "error": "文本为空"}), 400
+        text = text[:2000]  # cap to keep one synth call bounded
+        mood = data.get("mood") if isinstance(data.get("mood"), dict) else None
+        try:
+            wav_bytes, _sr = ve.synthesize(text, mood_to_instruct(mood))
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return Response(wav_bytes, mimetype="audio/wav")
+
     @app.route("/api/voice/chat", methods=["POST"])
     def voice_chat():
         """Streaming voice reply over SSE.

@@ -592,6 +592,25 @@
     display: flex; align-items: center; gap: 10px;
   }
   .composer-hint .grow { flex: 1; }
+  /* per-message audio replay (🔊) button */
+  .role-row .replay {
+    margin-left: 6px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 12.5px;
+    line-height: 1;
+    opacity: 0.45;
+    padding: 1px 3px;
+    border-radius: 4px;
+    transition: opacity 0.15s, background 0.15s;
+  }
+  .msg:hover .role-row .replay { opacity: 0.8; }
+  .role-row .replay:hover { opacity: 1; background: rgba(168,88,66,0.12); }
+  .role-row .replay:disabled { cursor: progress; opacity: 0.5; }
+  .role-row .replay.playing { opacity: 1; }
+  .role-row .replay.loading { animation: replayspin 0.9s linear infinite; }
+  @keyframes replayspin { to { transform: rotate(360deg); } }
   .voice-status {
     font-family: "JetBrains Mono", monospace;
     font-size: 11px;
@@ -1598,6 +1617,17 @@ function appendMessage(role, content, opts = {}) {
   } else {
     contentEl.textContent = content;
   }
+  // Assistant messages get a 🔊 replay button that (re)synthesizes Lina's voice
+  // for that line on demand — works for live, text, and history messages.
+  if (role === 'assistant') {
+    wrap.__meta = opts.meta || null;
+    const btn = document.createElement('button');
+    btn.className = 'replay';
+    btn.title = '重听（朗读这条消息）';
+    btn.textContent = '🔊';
+    btn.addEventListener('click', () => replayMessage(wrap, btn));
+    wrap.querySelector('.role-row').appendChild(btn);
+  }
   root.appendChild(wrap);
   scrollToBottom();
   return wrap;
@@ -1605,11 +1635,15 @@ function appendMessage(role, content, opts = {}) {
 
 function setBubbleMood(wrap, meta) {
   if (!meta) return;
+  wrap.__meta = meta;  // keep latest mood for the replay button's delivery style
   const roleRow = wrap.querySelector('.role-row');
   if (!roleRow) return;
   // Strip any existing chips first
   roleRow.querySelectorAll('.mood-chip').forEach(el => el.remove());
-  roleRow.insertAdjacentHTML('beforeend', moodChipHTML(meta));
+  // Insert chips before the replay button (if present) so it stays last.
+  const replayBtn = roleRow.querySelector('.replay');
+  if (replayBtn) replayBtn.insertAdjacentHTML('beforebegin', moodChipHTML(meta));
+  else roleRow.insertAdjacentHTML('beforeend', moodChipHTML(meta));
 }
 
 function scrollToBottom() {
@@ -2509,6 +2543,49 @@ function stopAudio() {
   voice.audioQueue.forEach(URL.revokeObjectURL);
   voice.audioQueue = [];
   voice.playing = false;
+}
+
+// ---- Per-message replay (🔊) ----
+function playReplay(url, btn) {
+  stopAudio();                       // interrupt any live/queued audio
+  const el = ensureAudioEl();
+  voice.playing = true;
+  if (btn) btn.classList.add('playing');
+  const done = () => { voice.playing = false; if (btn) btn.classList.remove('playing'); };
+  el.onended = done;
+  el.onerror = done;
+  el.src = url;
+  el.play().catch(() => done());
+}
+
+async function replayMessage(wrap, btn) {
+  const text = (wrap.querySelector('.content')?.textContent || '').trim();
+  if (!text) return;
+  if (voice.modelState !== 'ready') {
+    toast(voice.modelState === 'loading' ? '语音模型加载中，请稍候…' : '语音模型未就绪，无法朗读。');
+    return;
+  }
+  // Cached from a previous replay of this exact message → instant.
+  if (wrap.__audioUrl) { playReplay(wrap.__audioUrl, btn); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  try {
+    const res = await fetch('/api/voice/say', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
+      body: JSON.stringify({ text, mood: wrap.__meta || null }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || ('HTTP ' + res.status));
+    }
+    const url = URL.createObjectURL(await res.blob());
+    wrap.__audioUrl = url;
+    playReplay(url, btn);
+  } catch (e) {
+    toast('朗读失败：' + e.message);
+  } finally {
+    btn.classList.remove('loading'); btn.disabled = false;
+  }
 }
 
 // ---- Recording ----
