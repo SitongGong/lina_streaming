@@ -65,6 +65,10 @@ class Conversation:
     # Engine merges these on top of last_assistant_meta then clears the
     # field. {mood?: str, intensity?: int 1-10, trust?: int 1-10}
     forced_state: dict | None = None
+    # Owner of this session — a random per-browser id (localStorage). Used to
+    # scope the sidebar so testers on a shared public URL only see their own
+    # sessions. None = legacy/untagged (won't appear in any client's list).
+    client_id: str | None = None
 
     def add(self, role: str, content: str, meta: dict | None = None) -> Message:
         msg = Message(role=role, content=content, meta=meta)
@@ -95,6 +99,8 @@ class Conversation:
             d["prompt_overrides"] = self.prompt_overrides
         if self.forced_state:
             d["forced_state"] = self.forced_state
+        if self.client_id:
+            d["client_id"] = self.client_id
         return d
 
     @classmethod
@@ -107,6 +113,7 @@ class Conversation:
             prompt_version_id=d.get("prompt_version_id"),
             prompt_overrides=d.get("prompt_overrides"),
             forced_state=d.get("forced_state"),
+            client_id=d.get("client_id"),
             messages=[Message.from_dict(m) for m in d.get("messages", [])],
         )
 
@@ -161,6 +168,7 @@ class ConversationStore:
                         "message_count": len(data.get("messages", [])),
                         "prompt_mode": data.get("prompt_mode", "shared"),
                         "prompt_version_id": data.get("prompt_version_id"),
+                        "client_id": data.get("client_id"),
                     }
                 )
             except Exception:

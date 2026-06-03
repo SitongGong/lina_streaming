@@ -416,7 +416,10 @@ class CharacterEngine:
             return user_message
         return "\n\n".join(sections)
 
-    def chat(self, conversation: Conversation, user_message: str) -> ChatResult:
+    def _prepare(self, conversation: Conversation, user_message: str) -> dict:
+        """Shared setup for chat() and chat_stream(): RAG retrieval, mood
+        seeding, and the assembled API `messages` list. Pure (no mutation of
+        the conversation), so streaming can abort without side effects."""
         retrieved = self.rag.retrieve(user_message, k=self.retrieve_k)
 
         # Retrieve from older turns of THIS session that won't fit in the
@@ -473,12 +476,24 @@ class CharacterEngine:
                 ),
             }
         ]
+        return {
+            "retrieved": retrieved,
+            "retrieved_history": retrieved_history,
+            "forced": forced,
+            "api_messages": api_messages,
+        }
+
+    def chat(self, conversation: Conversation, user_message: str) -> ChatResult:
+        prep = self._prepare(conversation, user_message)
+        retrieved = prep["retrieved"]
+        retrieved_history = prep["retrieved_history"]
+        forced = prep["forced"]
 
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=self._system_blocks,
-            messages=api_messages,
+            messages=prep["api_messages"],
         )
 
         text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
@@ -503,3 +518,92 @@ class CharacterEngine:
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
         )
+
+    def chat_stream(self, conversation: Conversation, user_message: str):
+        """Streaming counterpart to chat(). A generator yielding event dicts:
+
+            {"type": "mood",  "mood": {...}|None}   — emitted once, as soon as
+                                                       the leading [mood:] line
+                                                       is parsed off the front.
+            {"type": "delta", "text": "..."}        — incremental visible text,
+                                                       mood line already stripped.
+            {"type": "done",  "mood", "retrieved",
+             "retrieved_history", "usage"}          — final summary.
+
+        The conversation is persisted (user + assistant turns) ONLY when the
+        stream runs to completion. If the consumer stops iterating early — the
+        interrupt case — `GeneratorExit` propagates through the open stream,
+        aborting the Anthropic request, and nothing is saved. That matches the
+        product rule: a barged-in turn is treated as a mistake and discarded.
+        """
+        prep = self._prepare(conversation, user_message)
+        retrieved = prep["retrieved"]
+        retrieved_history = prep["retrieved_history"]
+        forced = prep["forced"]
+
+        header_done = False  # have we parsed/stripped the [mood:] header line?
+        header_buf = ""
+        mood: dict | None = None
+        cleaned_parts: list[str] = []
+
+        def _emit_header(buf: str):
+            """Parse the mood tag off `buf`; return (mood, cleaned_visible_text)."""
+            return parse_mood_tag(buf)
+
+        with self.client.messages.stream(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=self._system_blocks,
+            messages=prep["api_messages"],
+        ) as stream:
+            for delta in stream.text_stream:
+                if not delta:
+                    continue
+                if not header_done:
+                    header_buf += delta
+                    # The mood tag occupies the first line; once we've seen a
+                    # newline the header is complete and we can strip it.
+                    if "\n" in header_buf:
+                        cleaned, mood = _emit_header(header_buf)
+                        header_done = True
+                        yield {"type": "mood", "mood": mood}
+                        if cleaned:
+                            cleaned_parts.append(cleaned)
+                            yield {"type": "delta", "text": cleaned}
+                    continue
+                cleaned_parts.append(delta)
+                yield {"type": "delta", "text": delta}
+
+            # Stream finished. If we never saw a newline (single-line reply or
+            # a dropped tag), parse whatever we buffered now.
+            if not header_done:
+                cleaned, mood = _emit_header(header_buf)
+                yield {"type": "mood", "mood": mood}
+                if cleaned:
+                    cleaned_parts.append(cleaned)
+                    yield {"type": "delta", "text": cleaned}
+
+            final = stream.get_final_message()
+
+        cleaned_full = "".join(cleaned_parts).strip()
+
+        # Reached only on normal completion — safe to persist.
+        conversation.add("user", user_message)
+        conversation.add("assistant", cleaned_full, meta=mood)
+        if forced:
+            conversation.forced_state = None
+
+        usage = getattr(final, "usage", None)
+        yield {
+            "type": "done",
+            "text": cleaned_full,
+            "mood": mood,
+            "retrieved": retrieved,
+            "retrieved_history": retrieved_history,
+            "usage": {
+                "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+                "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+            },
+        }

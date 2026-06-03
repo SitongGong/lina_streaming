@@ -7,7 +7,10 @@ environment, ~/.lina_key, or the "/api/auth" endpoint at runtime.
 
 from __future__ import annotations
 
+import base64
 import difflib
+import io
+import os
 import re
 import threading
 import time
@@ -16,12 +19,14 @@ from pathlib import Path
 
 import json
 
+import anthropic
 from flask import Flask, Response, jsonify, render_template, request
 
 from . import character as character_mod
 from .character import CharacterEngine, DEFAULT_MODEL
 from .config import CONVERSATIONS_DIR, PROJECT_ROOT, STATIC_DIR, resolve_api_key
 from .conversation import ConversationStore
+from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
 # ---- Engine pool: one CharacterEngine per pinned prompt version. The
@@ -29,9 +34,13 @@ from .conversation import ConversationStore
 # shown in the 提示词 tab). Engines are created lazily on first chat and
 # evicted when their underlying overrides change.
 _CURRENT_KEY = "_current_"
+# Credentials are PER CLIENT (per browser, keyed by X-Client-Id), not global —
+# so on a shared public URL each tester uses their own API key and one tester
+# connecting never overrides another's key. Engine-pool keys are prefixed with
+# the client id (`<cid>\x00<prompt-source>`) so engines never cross clients.
 _engine_pool: dict[str, CharacterEngine] = {}
-_api_key: str | None = None
-_engine_model: str = DEFAULT_MODEL
+_client_creds: dict[str, dict] = {}   # cid -> {"key": str, "model": str}
+_ANON_CLIENT = "_anon_"               # bucket for header-less (curl/admin) calls
 _engine_lock = threading.Lock()
 _store = ConversationStore(CONVERSATIONS_DIR)
 
@@ -271,18 +280,53 @@ def _default_value(key: str) -> str:
     }.get(key, "")
 
 
-def _engine_ready() -> bool:
-    return _api_key is not None
+def _client_ready(cid: str | None) -> bool:
+    return cid is not None and cid in _client_creds
 
 
-def _set_credentials(api_key: str, model: str = DEFAULT_MODEL) -> None:
-    """Set/replace credentials and clear the pool. Engines will be lazily
-    re-created on first chat against each version."""
-    global _api_key, _engine_model
+def _validate_key(key: str, model: str) -> tuple[bool, str | None]:
+    """Verify an API key really works before accepting it, so a wrong key is
+    rejected at connect time instead of silently failing on the first chat.
+
+    A 1-token request is the cheapest probe. We only hard-reject on an auth
+    error; transient/other failures are allowed through rather than locking a
+    user out over a hiccup."""
+    try:
+        anthropic.Anthropic(api_key=key).messages.create(
+            model=model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        return True, None
+    except anthropic.AuthenticationError:
+        return False, "API Key 无效或已过期。"
+    except anthropic.PermissionDeniedError:
+        return False, "该 API Key 无权访问。"
+    except anthropic.NotFoundError:
+        # Bad model name, but the key itself authenticated fine.
+        return True, None
+    except Exception:
+        # Rate limit / network / etc. — don't block on a transient error.
+        return True, None
+
+
+def _client_id() -> str | None:
+    """Per-browser id (random, stored in the browser's localStorage) used to
+    scope the session list on a shared public URL so testers only see their
+    own chats. Sent as the `X-Client-Id` header by the web UI. This is a
+    convenience boundary for multi-user testing, not a security control."""
+    cid = (request.headers.get("X-Client-Id") or request.args.get("client_id") or "").strip()
+    return cid or None
+
+
+def _set_credentials(cid: str, api_key: str, model: str = DEFAULT_MODEL) -> None:
+    """Set/replace one client's credentials and drop just that client's cached
+    engines, so they rebuild with the new key/model. Other clients untouched."""
     with _engine_lock:
-        _api_key = api_key
-        _engine_model = model
-        _engine_pool.clear()
+        _client_creds[cid] = {"key": api_key, "model": model}
+        prefix = cid + "\x00"
+        for k in [k for k in _engine_pool if k.startswith(prefix)]:
+            _engine_pool.pop(k, None)
 
 
 def _effective_overrides_for(conv) -> dict[str, str]:
@@ -298,9 +342,10 @@ def _effective_overrides_for(conv) -> dict[str, str]:
     return dict(_overrides)
 
 
-def _engine_key_for(conv) -> str:
-    """Pool key. Private sessions get their own slot; shared sessions
-    collapse onto the version (or _current_)."""
+def _engine_base_key(conv) -> str:
+    """The prompt-source part of the pool key (shared across clients only in
+    name; the full key is per-client). Private sessions get their own slot;
+    shared sessions collapse onto the version (or _current_)."""
     if conv.prompt_mode == "private":
         return f"sess:{conv.session_id}"
     if conv.prompt_version_id and _load_version(conv.prompt_version_id) is not None:
@@ -308,50 +353,47 @@ def _engine_key_for(conv) -> str:
     return _CURRENT_KEY
 
 
-def _engine_for_session(conv) -> CharacterEngine | None:
-    """Returns a cached engine for this session's prompt mode/source."""
-    if not _engine_ready():
+def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
+    """Returns a cached engine for this client + session's prompt mode/source,
+    built with THAT client's API key and model."""
+    creds = _client_creds.get(cid)
+    if not creds:
         return None
-    key = _engine_key_for(conv)
+    key = cid + "\x00" + _engine_base_key(conv)
     with _engine_lock:
         engine = _engine_pool.get(key)
         if engine is not None:
             return engine
         engine = CharacterEngine(
-            api_key=_api_key,
+            api_key=creds["key"],
             static_dir=STATIC_DIR,
-            model=_engine_model,
+            model=creds["model"],
             overrides=_effective_overrides_for(conv),
         )
         _engine_pool[key] = engine
         return engine
 
 
-def _invalidate_current_engine() -> None:
-    """Drop the engine that's using the editable global state. Called after
-    any mutation of _overrides."""
+def _pop_engines_with_suffix(suffix: str) -> None:
+    """Drop pooled engines whose key ends with `suffix`, across ALL clients —
+    used when a shared prompt source changes (affects everyone using it)."""
     with _engine_lock:
-        _engine_pool.pop(_CURRENT_KEY, None)
+        for k in [k for k in _engine_pool if k.endswith(suffix)]:
+            _engine_pool.pop(k, None)
+
+
+def _invalidate_current_engine() -> None:
+    """Drop every client's engine using the editable global overrides."""
+    _pop_engines_with_suffix("\x00" + _CURRENT_KEY)
 
 
 def _invalidate_engine(version_id: str) -> None:
-    with _engine_lock:
-        _engine_pool.pop(version_id, None)
+    _pop_engines_with_suffix("\x00" + version_id)
 
 
 def _invalidate_session_engine(session_id: str) -> None:
     """Drop the engine for a private session after its overrides change."""
-    with _engine_lock:
-        _engine_pool.pop(f"sess:{session_id}", None)
-
-
-def _peek_active_engine() -> CharacterEngine | None:
-    """Returns any engine in the pool, used only for /api/status display of
-    the current model. May be None if no chat has happened yet."""
-    with _engine_lock:
-        for v in _engine_pool.values():
-            return v
-        return None
+    _pop_engines_with_suffix("\x00sess:" + session_id)
 
 
 def create_app() -> Flask:
@@ -365,11 +407,19 @@ def create_app() -> Flask:
     global _overrides
     _overrides = _load_overrides_from_disk()
 
-    # Pick up an API key from env / keyfile if present. Engines are
-    # created lazily per pinned version on the first chat.
-    existing_key = resolve_api_key()
-    if existing_key:
-        _set_credentials(existing_key)
+    # NOTE: we intentionally do NOT auto-connect from env / ~/.lina_key at
+    # startup. The server boots unauthenticated so every visitor must supply a
+    # working API key. The server-side default key (env ANTHROPIC_API_KEY /
+    # ~/.lina_key) is reachable ONLY via the hidden "0" shortcut in /api/auth.
+
+    # Pre-load the ASR/TTS models at startup (in a background thread) so the
+    # mic is ready without a cold ~30s wait on the first click. Set
+    # LINA_VOICE_PRELOAD=0 to keep the old lazy-on-click behavior.
+    if os.environ.get("LINA_VOICE_PRELOAD", "1") not in ("0", "false", "False", ""):
+        try:
+            get_voice_engine().ensure_loading()
+        except Exception:
+            pass
 
     @app.route("/")
     def index():
@@ -377,22 +427,39 @@ def create_app() -> Flask:
 
     @app.route("/api/status")
     def status():
+        cid = _client_id() or _ANON_CLIENT
+        creds = _client_creds.get(cid)
         return jsonify(
             {
-                "ready": _engine_ready(),
-                "model": _engine_model if _engine_ready() else None,
+                "ready": creds is not None,
+                "model": creds["model"] if creds else None,
                 "default_model": DEFAULT_MODEL,
             }
         )
 
     @app.route("/api/auth", methods=["POST"])
     def auth():
+        cid = _client_id() or _ANON_CLIENT
         data = request.get_json(force=True, silent=True) or {}
         key = (data.get("api_key") or "").strip()
         model = (data.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         if not key:
             return jsonify({"ok": False, "error": "缺少 api_key"}), 400
-        _set_credentials(key, model=model)
+        # Shortcut: a literal "0" means "use the server-side default key"
+        # (env ANTHROPIC_API_KEY / ~/.lina_key). The real key is resolved
+        # entirely server-side and is NEVER sent back to the browser. The
+        # default key is trusted, so we skip validation for it.
+        if key == "0":
+            default_key = resolve_api_key()
+            if not default_key:
+                return jsonify({"ok": False, "error": "服务器未配置默认密钥。"}), 400
+            key = default_key
+        else:
+            # A user-supplied key must actually authenticate before we accept it.
+            ok, err = _validate_key(key, model)
+            if not ok:
+                return jsonify({"ok": False, "error": err}), 401
+        _set_credentials(cid, key, model=model)
         return jsonify({"ok": True, "model": model})
 
     def _enrich_sessions(sessions: list[dict]) -> list[dict]:
@@ -423,7 +490,13 @@ def create_app() -> Flask:
 
     @app.route("/api/sessions", methods=["GET"])
     def list_sessions():
-        return jsonify({"sessions": _enrich_sessions(_store.list_sessions())})
+        sessions = _store.list_sessions()
+        cid = _client_id()
+        # With a client id (the normal UI path) scope to that browser's own
+        # sessions. Without one (curl/admin), return everything for debugging.
+        if cid is not None:
+            sessions = [s for s in sessions if s.get("client_id") == cid]
+        return jsonify({"sessions": _enrich_sessions(sessions)})
 
     @app.route("/api/sessions", methods=["POST"])
     def new_session():
@@ -438,6 +511,7 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "指定的版本不存在"}), 400
         conv = _store.new_session(requested)
         conv.prompt_version_id = version_id
+        conv.client_id = _client_id()  # tag owner so the sidebar stays private
         _store.save(conv)
         return jsonify(
             {
@@ -648,7 +722,8 @@ def create_app() -> Flask:
 
     @app.route("/api/chat", methods=["POST"])
     def chat():
-        if not _engine_ready():
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
             return jsonify({"ok": False, "error": "请先在右上角输入 Anthropic API Key。"}), 401
 
         data = request.get_json(force=True, silent=True) or {}
@@ -667,7 +742,7 @@ def create_app() -> Flask:
             and _load_version(conv.prompt_version_id) is None
         )
 
-        engine = _engine_for_session(conv)
+        engine = _engine_for_session(conv, cid)
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
 
@@ -700,6 +775,158 @@ def create_app() -> Flask:
                     "cache_read_input_tokens": result.cache_read_tokens,
                 },
             }
+        )
+
+    # ---------- Voice pipeline (local ASR + streaming TTS) ----------
+
+    def _sse(obj: dict) -> str:
+        return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+    @app.route("/api/voice/status", methods=["GET"])
+    def voice_status():
+        return jsonify(get_voice_engine().status())
+
+    @app.route("/api/voice/init", methods=["POST"])
+    def voice_init():
+        """Kick off the (lazy, background) load of the ASR/TTS models."""
+        return jsonify(get_voice_engine().ensure_loading())
+
+    @app.route("/api/voice/transcribe", methods=["POST"])
+    def voice_transcribe():
+        """Push-to-talk ASR: a WAV blob in → recognized text out.
+
+        The browser records via Web Audio and uploads a 16 kHz mono WAV, so we
+        decode with soundfile (no ffmpeg needed) and hand the waveform to the
+        local Qwen3-ASR model."""
+        ve = get_voice_engine()
+        if ve.status()["state"] != "ready":
+            return jsonify({"ok": False, "error": "语音模型尚未就绪。"}), 409
+        file = request.files.get("audio")
+        if file is None:
+            return jsonify({"ok": False, "error": "缺少音频。"}), 400
+        try:
+            import soundfile as sf
+
+            wav, sr = sf.read(io.BytesIO(file.read()), dtype="float32")
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"音频解码失败：{e}"}), 400
+        try:
+            text = ve.transcribe(wav, sr)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "text": text})
+
+    @app.route("/api/voice/chat", methods=["POST"])
+    def voice_chat():
+        """Streaming voice reply over SSE.
+
+        Streams Claude's tokens as `delta` events for live captions, and — as
+        each spoken sentence completes — synthesizes it and emits the audio as
+        a base64 `audio` event so playback begins on sentence #1 rather than
+        after the whole reply. If the client aborts the request (the barge-in
+        interrupt), the generator is closed, the upstream Claude stream is
+        aborted, and nothing is persisted."""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        message = (data.get("message") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+        if not message:
+            return jsonify({"ok": False, "error": "消息为空"}), 400
+
+        conv = _store.load(session_id)
+        engine = _engine_for_session(conv, cid)
+        if engine is None:
+            return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+
+        ve = get_voice_engine()
+        tts_ready = ve.status()["state"] == "ready"
+
+        def event_stream():
+            gen = engine.chat_stream(conv, message)
+            pending = ""        # visible text not yet flushed to a TTS sentence
+            cur_mood = None     # latest parsed mood — drives TTS delivery style
+            idx = 0             # audio chunk ordering index
+
+            def synth(sentence: str):
+                nonlocal idx
+                if not tts_ready:
+                    return None
+                try:
+                    wav_bytes, _sr = ve.synthesize(sentence, mood_to_instruct(cur_mood))
+                except Exception:
+                    return None
+                if not wav_bytes:
+                    return None
+                ev = {
+                    "type": "audio",
+                    "index": idx,
+                    "text": sentence,
+                    "mime": "audio/wav",
+                    "audio": base64.b64encode(wav_bytes).decode("ascii"),
+                }
+                idx += 1
+                return ev
+
+            try:
+                for ev in gen:
+                    etype = ev.get("type")
+                    if etype == "mood":
+                        cur_mood = ev.get("mood")
+                        yield _sse({"type": "mood", "mood": cur_mood})
+                    elif etype == "delta":
+                        yield _sse({"type": "delta", "text": ev["text"]})
+                        pending += ev["text"]
+                        sentences, pending = iter_sentences(pending)
+                        for s in sentences:
+                            audio_ev = synth(s)
+                            if audio_ev:
+                                yield _sse(audio_ev)
+                    elif etype == "done":
+                        # Speak whatever's left in the buffer as a last chunk.
+                        sentences, pending = iter_sentences(pending, flush=True)
+                        for s in sentences:
+                            audio_ev = synth(s)
+                            if audio_ev:
+                                yield _sse(audio_ev)
+                        # engine.chat_stream has now mutated conv; persist it.
+                        _store.save(conv)
+                        yield _sse(
+                            {
+                                "type": "done",
+                                "mood": ev.get("mood"),
+                                "text": ev.get("text", ""),
+                                "forced_state": conv.forced_state,  # None after one-shot consumption
+                                "usage": ev.get("usage"),
+                                "retrieved": [
+                                    {"source": c.source, "heading": c.heading, "text": c.text}
+                                    for c in ev.get("retrieved", [])
+                                ],
+                                "retrieved_history": [
+                                    {"source": c.source, "heading": c.heading, "text": c.text}
+                                    for c in ev.get("retrieved_history", [])
+                                ],
+                            }
+                        )
+            except Exception as e:  # noqa: BLE001 — surface mid-stream errors
+                yield _sse({"type": "error", "error": str(e)})
+            finally:
+                # Closing the engine generator aborts the upstream Claude
+                # request if the client bailed (barge-in). On a clean finish
+                # this is a harmless no-op.
+                gen.close()
+
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     # ---------- Prompt override endpoints ----------

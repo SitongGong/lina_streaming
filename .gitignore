@@ -8,3 +8,4 @@ conversations/*.json
 .DS_Store
 .claude/settings.local.json
 prompt_overrides/
+certs/

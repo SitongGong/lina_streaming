@@ -1,2 +1,12 @@
 anthropic>=0.40.0
 flask>=3.0.0
+gunicorn>=21.0  # production server for public deployment (see gunicorn_conf.py)
+
+# Voice pipeline (web GUI mic). soundfile + numpy are imported at startup;
+# the heavy GPU models below are imported lazily, only when voice is enabled.
+numpy>=1.24
+soundfile>=0.12
+# Local ASR / TTS — require a CUDA GPU. Install separately to match your CUDA:
+#   torch torchaudio
+#   qwen-asr   (Qwen3-ASR-1.7B)
+#   qwen-tts   (Qwen3-TTS-12Hz-1.7B-CustomVoice)
