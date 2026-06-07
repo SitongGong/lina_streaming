@@ -24,7 +24,15 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from . import character as character_mod
 from .character import CharacterEngine, DEFAULT_MODEL
-from .config import CONVERSATIONS_DIR, PROJECT_ROOT, STATIC_DIR, resolve_api_key
+from .config import (
+    CONVERSATIONS_DIR,
+    PROJECT_ROOT,
+    STATIC_DIR,
+    resolve_api_key,
+    resolve_openai_api_key,
+    resolve_proactive_pacing,
+)
+from .controller import LinaController, build_default_controller
 from .conversation import ConversationStore
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
@@ -43,6 +51,22 @@ _client_creds: dict[str, dict] = {}   # cid -> {"key": str, "model": str}
 _ANON_CLIENT = "_anon_"               # bucket for header-less (curl/admin) calls
 _engine_lock = threading.Lock()
 _store = ConversationStore(CONVERSATIONS_DIR)
+
+# Shared per-turn decision controller (rule layer + gpt-5-mini advisors).
+# Stateless config — safe to share across all clients. Built once from
+# OPENAI_API_KEY; `None`-LLM fallback is fine (rules-only still works).
+_controller: LinaController | None = None
+
+
+def _ensure_controller() -> LinaController | None:
+    """Lazily build the shared LinaController. Safe to call repeatedly."""
+    global _controller
+    if _controller is not None:
+        return _controller
+    with _engine_lock:
+        if _controller is None:
+            _controller = build_default_controller(api_key=resolve_openai_api_key())
+        return _controller
 
 # ---------- Prompt-override layer ----------
 # Editable from the web UI. Stored locally (gitignored), reapplied on
@@ -369,6 +393,7 @@ def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
             static_dir=STATIC_DIR,
             model=creds["model"],
             overrides=_effective_overrides_for(conv),
+            controller=_ensure_controller(),
         )
         _engine_pool[key] = engine
         return engine
@@ -407,6 +432,10 @@ def create_app() -> Flask:
     global _overrides
     _overrides = _load_overrides_from_disk()
 
+    # Build the shared controller eagerly so any startup error (bad OpenAI
+    # key, missing dep) shows in the server log, not on the first chat.
+    _ensure_controller()
+
     # NOTE: we intentionally do NOT auto-connect from env / ~/.lina_key at
     # startup. The server boots unauthenticated so every visitor must supply a
     # working API key. The server-side default key (env ANTHROPIC_API_KEY /
@@ -429,11 +458,17 @@ def create_app() -> Flask:
     def status():
         cid = _client_id() or _ANON_CLIENT
         creds = _client_creds.get(cid)
+        ctrl = _ensure_controller()
         return jsonify(
             {
                 "ready": creds is not None,
                 "model": creds["model"] if creds else None,
                 "default_model": DEFAULT_MODEL,
+                "controller": {
+                    "enabled": ctrl is not None,
+                    "has_llm": bool(ctrl and ctrl.has_llm),
+                },
+                "proactive_pacing": resolve_proactive_pacing(),
             }
         )
 
@@ -729,6 +764,8 @@ def create_app() -> Flask:
         data = request.get_json(force=True, silent=True) or {}
         session_id = (data.get("session_id") or "").strip()
         message = (data.get("message") or "").strip()
+        # 可选：用户像微信那样引用了莉娜之前的某条消息来回复。限长防滥用。
+        quoted_text = (data.get("quoted_text") or "").strip()[:500]
         if not session_id:
             return jsonify({"ok": False, "error": "缺少 session_id"}), 400
         if not message:
@@ -747,7 +784,7 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
 
         try:
-            result = engine.chat(conv, message)
+            result = engine.chat(conv, message, quoted_text=quoted_text)
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
@@ -768,6 +805,107 @@ def create_app() -> Flask:
                     {"source": c.source, "heading": c.heading, "text": c.text}
                     for c in result.retrieved_history
                 ],
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
+                "pending_segments": result.pending_segments,
+                "has_more_segments": bool(result.pending_segments),
+                "usage": {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "cache_creation_input_tokens": result.cache_creation_tokens,
+                    "cache_read_input_tokens": result.cache_read_tokens,
+                },
+            }
+        )
+
+    @app.route("/api/continue", methods=["POST"])
+    def continue_segment():
+        """续说：把上一条回复没说完的下一小段说出来。前端在收到
+        has_more_segments=true 后用短计时器调它；用户发新消息会自然作废。"""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "引擎未就绪。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+
+        conv = _store.load(session_id)
+        if not conv.pending_segments:
+            return jsonify({"ok": True, "skipped": True, "reason": "no_pending_segments"})
+
+        engine = _engine_for_session(conv, cid)
+        if engine is None:
+            return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+        try:
+            result = engine.continue_segment(conv)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        if result is None:
+            return jsonify({"ok": True, "skipped": True, "reason": "no_pending_segments"})
+        _store.save(conv)
+
+        return jsonify(
+            {
+                "ok": True,
+                "continuation": True,
+                "reply": result.text,
+                "mood": result.mood,
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
+                "pending_segments": result.pending_segments,
+                "has_more_segments": bool(result.pending_segments),
+                "usage": {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "cache_creation_input_tokens": result.cache_creation_tokens,
+                    "cache_read_input_tokens": result.cache_read_tokens,
+                },
+            }
+        )
+
+    @app.route("/api/proactive", methods=["POST"])
+    def proactive():
+        """用户闲置时由前端计时器触发：莉娜主动发言。
+        body.mode: "engage"（默认，抛话头）/ "farewell"（多次未回应后告别）。"""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "引擎未就绪。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+        mode = (data.get("mode") or "engage").strip().lower()
+        if mode not in ("engage", "farewell"):
+            mode = "engage"
+
+        conv = _store.load(session_id)
+        # 没有任何用户历史就不主动发言（避免硬造话题）。
+        if not any(m.role == "user" for m in conv.messages):
+            return jsonify({"ok": True, "skipped": True, "reason": "no_history"})
+
+        engine = _engine_for_session(conv, cid)
+        if engine is None:
+            return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+        try:
+            if mode == "farewell":
+                result = engine.proactive_farewell(conv)
+            else:
+                result = engine.proactive(conv)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        _store.save(conv)
+
+        return jsonify(
+            {
+                "ok": True,
+                "proactive": True,
+                "mode": mode,
+                "farewell": mode == "farewell",
+                "reply": result.text,
+                "mood": result.mood,
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
                 "usage": {
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,

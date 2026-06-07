@@ -1097,6 +1097,71 @@
   .diff-block-empty {
     padding: 14px; font-size: 12.5px; color: var(--ink-faint); font-style: italic; text-align: center;
   }
+  /* ---- 主动发言开关 + 节奏配置（顶栏） ---- */
+  .proactive-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12.5px; color: var(--ink-soft); cursor: pointer;
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+    user-select: none; white-space: nowrap;
+  }
+  .proactive-toggle input { cursor: pointer; margin: 0; }
+  .proactive-config {
+    display: inline-flex; align-items: center; gap: 2px; white-space: nowrap;
+    font-size: 12px; color: var(--ink-soft);
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  }
+  .proactive-config input[type="number"] {
+    width: 38px; padding: 2px 4px; margin: 0 3px;
+    font-family: inherit; font-size: 12px; text-align: center;
+    border: 1px solid var(--line); border-radius: 4px; background: #fff;
+    color: var(--ink);
+  }
+  .proactive-config input[type="number"]:focus { outline: none; border-color: var(--accent-soft); }
+  .proactive-config.disabled { opacity: 0.35; pointer-events: none; }
+  /* 主动 / 告别消息的角标 */
+  .msg.proactive .role-row .role::after {
+    content: "· 主动"; color: var(--gold); font-size: 11px; margin-left: 4px;
+  }
+  .msg.proactive.farewell .role-row .role::after {
+    content: "· 告别"; color: var(--accent);
+  }
+  /* ---- 引用回复 ---- */
+  .quote-bar {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px; padding: 7px 12px;
+    background: rgba(168,88,66,0.07);
+    border-left: 3px solid var(--accent-soft);
+    border-radius: 4px;
+    font-size: 12.5px; color: var(--ink-soft);
+  }
+  .quote-bar-label { color: var(--accent); flex-shrink: 0; font-size: 12px; }
+  .quote-bar-text {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--ink-faint); font-style: italic;
+  }
+  .quote-bar-clear {
+    flex-shrink: 0; border: none; background: transparent;
+    color: var(--ink-faint); cursor: pointer; font-size: 16px; line-height: 1;
+    padding: 0 2px;
+  }
+  .quote-bar-clear:hover { color: var(--accent); }
+  .quote-btn {
+    border: none; background: transparent;
+    color: var(--ink-faint); cursor: pointer;
+    font-family: inherit; font-size: 11px;
+    opacity: 0; transition: opacity 0.15s, color 0.15s;
+    padding: 0 4px;
+  }
+  .msg:hover .quote-btn { opacity: 0.7; }
+  .quote-btn:hover { color: var(--accent); opacity: 1; }
+  .quoted-in-msg {
+    border-left: 3px solid var(--accent-soft);
+    padding: 4px 9px; margin-bottom: 6px;
+    background: rgba(0,0,0,0.03);
+    border-radius: 3px;
+    font-size: 12.5px; color: var(--ink-faint); font-style: italic;
+    white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -1110,6 +1175,13 @@
     <button class="tab active" data-view="chat">对话</button>
     <button class="tab" data-view="prompts">提示词</button>
   </nav>
+  <label class="proactive-toggle" id="proactive-toggle" title="闲置后莉娜会主动开口；多次仍无回应则告别。关闭后该功能完全不激活。">
+    <input type="checkbox" id="proactive-checkbox">
+    <span>主动发言</span>
+  </label>
+  <span class="proactive-config" id="proactive-config" title="首次间隔=第一次主动开口前等多久（之后每次按退避逐渐拉长，且带随机抖动）；上限=连续未回应到第几次时改为告别并停止。">
+    首次<input type="number" id="proactive-interval" min="1" max="60" step="1">分钟·共<input type="number" id="proactive-max-nudges" min="1" max="20" step="1">次后告别
+  </span>
   <div class="grow"></div>
   <div class="auth-card" id="auth-card">
     <span class="status-dot" id="status-dot" title="未连接"></span>
@@ -1179,6 +1251,11 @@
     </div>
 
     <div class="composer">
+      <div class="quote-bar" id="quote-bar" style="display:none">
+        <span class="quote-bar-label">回复：</span>
+        <span class="quote-bar-text" id="quote-bar-text"></span>
+        <button class="quote-bar-clear" id="quote-bar-clear" title="取消引用">×</button>
+      </div>
       <div class="composer-inner">
         <textarea id="input" rows="1" placeholder="对她说点什么……（Shift+Enter 换行，Enter 发送）"></textarea>
         <button class="mic" id="mic-btn" title="点击开始说话，再点一次结束。她回话时再点一次 = 打断重说。">🎤</button>
@@ -1281,7 +1358,60 @@ let state = {
   currentSession: null,
   sessions: [],
   sending: false,
+  // 主动发言 / 续说
+  proactiveEnabled: true,
+  proactiveIntervalMin: 3,   // 首次主动开口前等多少分钟（驱动退避基准）
+  proactiveMaxNudges: 3,     // 连续 N 次未回应 → 第 N 次改为「告别」并停止
+  proactiveCount: 0,         // 上一次用户互动以来已主动发言的次数
+  lastActivity: Date.now(),
+  proactiveBusy: false,
+  lastMeta: null,
+  // 续说：上一条回复 park 下来还没说完的小段要点；非空时优先走续说。
+  pendingSegments: [],
+  // 引用回复：用户点了莉娜某条消息的"引用"，这里存被引用的原文；发送后清空。
+  quotedText: '',
+  // 节奏参数（magic numbers），由后端 /api/status 下发后覆盖。这里是兜底默认。
+  pacing: {
+    continue_base_ms: 3000,
+    continue_jitter: 0.25,
+    engage_base_ms: 30000,
+    engage_multiplier: 1.8,
+    engage_jitter: 0.3,
+    max_nudges: 3,
+  },
 };
+
+// ---- 节奏 / 闲置轮询 helper ----
+function clampInt(v, lo, hi, dflt) {
+  const n = parseInt(v, 10);
+  if (Number.isNaN(n)) return dflt;
+  return Math.max(lo, Math.min(hi, n));
+}
+function withJitter(ms, jitter) {
+  const j = Math.max(0, Math.min(0.9, jitter || 0));
+  const factor = 1 + (Math.random() * 2 - 1) * j;  // [1-j, 1+j]
+  return Math.max(300, ms * factor);
+}
+// 这一轮"该等多久"——续说阶段短间隔，主动发言阶段指数退避。
+function nextDelayMs() {
+  const p = state.pacing;
+  if (state.pendingSegments && state.pendingSegments.length > 0) {
+    return withJitter(p.continue_base_ms, p.continue_jitter);
+  }
+  const backoff = p.engage_base_ms * Math.pow(p.engage_multiplier, state.proactiveCount);
+  return withJitter(backoff, p.engage_jitter);
+}
+// 轮询频率：必须比最短间隔（续说 ~3s）更密。只比时间戳，不到点不发请求。
+const PROACTIVE_POLL_MS = 2 * 1000;
+// 用户活动：重置闲置时间戳并清零主动发言计数（重新开始整套节奏）。
+function resetIdle() {
+  state.lastActivity = Date.now();
+  state.proactiveCount = 0;
+}
+// 主动发言/续说完成后：只刷新时间戳，不动计数。
+function afterNudge() {
+  state.lastActivity = Date.now();
+}
 
 // Per-browser id so that, on a shared public URL, each tester only sees their
 // own sessions in the sidebar. Persisted in localStorage; sent on every API
@@ -1329,6 +1459,12 @@ async function refreshStatus() {
       $('api-key').placeholder = '已连接 (留空保持现状)';
       $('model-select').value = s.model || s.default_model;
     }
+    // 主动发言 / 续说节奏参数由后端下发（可被环境变量调），覆盖前端默认。
+    if (s.proactive_pacing) {
+      state.pacing = Object.assign({}, state.pacing, s.proactive_pacing);
+    }
+    // 用户在 UI 设的"首次 N 分钟"优先级最高，覆盖后端默认的 engage_base_ms。
+    state.pacing.engage_base_ms = state.proactiveIntervalMin * 60 * 1000;
   } catch (e) {}
 }
 
@@ -1442,6 +1578,9 @@ async function selectSession(id) {
   // or stick around if something else mid-flight overwrites our clean-up.
   state.lastMeta = null;
   state.forcedState = null;
+  state.pendingSegments = [];   // 切会话作废上一个会话的续说计划
+  clearQuote();                 // 切会话清掉悬空的引用
+  resetIdle();                  // 切会话重置主动发言节奏
   renderStateBar(null, /*isStarting*/ true);
   renderForcedPill(null);
   closeStateEditor();
@@ -1599,7 +1738,7 @@ function appendMessage(role, content, opts = {}) {
   if (empty) empty.remove();
 
   const wrap = document.createElement('div');
-  wrap.className = 'msg ' + role;
+  wrap.className = 'msg ' + role + (opts.proactive ? ' proactive' : '') + (opts.farewell ? ' farewell' : '');
   const chip = (role === 'assistant' && opts.meta) ? moodChipHTML(opts.meta) : '';
   wrap.innerHTML = `
     <div class="avatar">${role === 'user' ? '你' : '莉'}</div>
@@ -1615,10 +1754,19 @@ function appendMessage(role, content, opts = {}) {
   if (opts.typing) {
     contentEl.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
   } else {
-    contentEl.textContent = content;
+    // 引用回复：用户气泡里先显示被引用的原文，再显示正文。
+    if (opts.quoted) {
+      const q = document.createElement('div');
+      q.className = 'quoted-in-msg';
+      q.textContent = opts.quoted;
+      contentEl.appendChild(q);
+    }
+    const body = document.createElement('div');
+    body.textContent = content;
+    contentEl.appendChild(body);
   }
-  // Assistant messages get a 🔊 replay button that (re)synthesizes Lina's voice
-  // for that line on demand — works for live, text, and history messages.
+  // Assistant messages get a 🔊 replay button (TTS) and a "引用" button
+  // (quote-reply, like WeChat). Both live in the role-row.
   if (role === 'assistant') {
     wrap.__meta = opts.meta || null;
     const btn = document.createElement('button');
@@ -1627,10 +1775,36 @@ function appendMessage(role, content, opts = {}) {
     btn.textContent = '🔊';
     btn.addEventListener('click', () => replayMessage(wrap, btn));
     wrap.querySelector('.role-row').appendChild(btn);
+
+    const qb = document.createElement('button');
+    qb.className = 'quote-btn';
+    qb.title = '引用这条回复';
+    qb.textContent = '引用';
+    // Read the bubble's CURRENT text at click time (the typing placeholder is
+    // filled in after this runs, so capturing `content` now would be empty).
+    qb.addEventListener('click', () => setQuote((contentEl.textContent || '').trim()));
+    wrap.querySelector('.role-row').appendChild(qb);
   }
   root.appendChild(wrap);
   scrollToBottom();
   return wrap;
+}
+
+// 引用回复：点中莉娜某条消息 → 在发送框上方挂一条引用，下次发送带上它。
+function setQuote(text) {
+  const t = (text || '').trim();
+  if (!t) return;
+  state.quotedText = t;
+  $('quote-bar-text').textContent = t;
+  $('quote-bar').style.display = 'flex';
+  $('input').focus();
+}
+function clearQuote() {
+  state.quotedText = '';
+  const bar = $('quote-bar');
+  if (bar) bar.style.display = 'none';
+  const txt = $('quote-bar-text');
+  if (txt) txt.textContent = '';
 }
 
 function setBubbleMood(wrap, meta) {
@@ -1718,15 +1892,24 @@ async function send() {
   ta.value = '';
   ta.style.height = 'auto';
   state.sending = true;
+  resetIdle();
   $('send-btn').disabled = true;
 
-  appendMessage('user', text);
+  // 取出本轮引用（若有），并立刻清掉引用条——它只作用于这一条消息。
+  const quoted = state.quotedText;
+  clearQuote();
+
+  appendMessage('user', text, quoted ? { quoted } : {});
   const typingEl = appendMessage('assistant', '', { typing: true });
 
   try {
     const data = await api('/api/chat', {
       method: 'POST',
-      body: JSON.stringify({ session_id: state.currentSession, message: text }),
+      body: JSON.stringify({
+        session_id: state.currentSession,
+        message: text,
+        quoted_text: quoted || undefined,
+      }),
     });
     typingEl.querySelector('.content').textContent = data.reply;
     setBubbleMood(typingEl, data.mood);
@@ -1735,13 +1918,18 @@ async function send() {
     state.lastMeta = data.mood || state.lastMeta;
     renderChunks(data.retrieved, data.retrieved_history);
     renderUsage(data.usage);
+    // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
+    // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
+    state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
     await loadSessions();
   } catch (e) {
     typingEl.querySelector('.content').textContent = '（出错了：' + e.message + '）';
     typingEl.querySelector('.content').style.color = 'var(--accent)';
+    state.pendingSegments = [];
   } finally {
     state.sending = false;
     $('send-btn').disabled = false;
+    resetIdle();  // 回复完毕，从此刻起重新计：先续说（若有），再主动发言
     scrollToBottom();
   }
 }
@@ -2776,7 +2964,127 @@ async function onMicClick() {
 
 $('mic-btn').addEventListener('click', onMicClick);
 
+// ---- 主动发言 / 续说：闲置轮询，两阶段（先续说，再主动找话） ----
+function loadProactivePref() {
+  const v = localStorage.getItem('lina_proactive');
+  state.proactiveEnabled = v !== 'off';   // 默认开启
+  $('proactive-checkbox').checked = state.proactiveEnabled;
+  state.proactiveIntervalMin = clampInt(localStorage.getItem('lina_proactive_interval'), 1, 60, 3);
+  state.proactiveMaxNudges = clampInt(localStorage.getItem('lina_proactive_max'), 1, 20, 3);
+  $('proactive-interval').value = state.proactiveIntervalMin;
+  $('proactive-max-nudges').value = state.proactiveMaxNudges;
+  // "首次 N 分钟"直接驱动退避基准 engage_base_ms。
+  state.pacing.engage_base_ms = state.proactiveIntervalMin * 60 * 1000;
+  $('proactive-config').classList.toggle('disabled', !state.proactiveEnabled);
+}
+function setProactivePref(on) {
+  state.proactiveEnabled = on;
+  localStorage.setItem('lina_proactive', on ? 'on' : 'off');
+  $('proactive-config').classList.toggle('disabled', !on);
+  if (on) resetIdle();
+}
+function setProactiveInterval(v) {
+  const n = clampInt(v, 1, 60, state.proactiveIntervalMin);
+  state.proactiveIntervalMin = n;
+  localStorage.setItem('lina_proactive_interval', String(n));
+  $('proactive-interval').value = n;
+  state.pacing.engage_base_ms = n * 60 * 1000;
+  resetIdle();
+}
+function setProactiveMaxNudges(v) {
+  const n = clampInt(v, 1, 20, state.proactiveMaxNudges);
+  state.proactiveMaxNudges = n;
+  localStorage.setItem('lina_proactive_max', String(n));
+  $('proactive-max-nudges').value = n;
+}
+
+// 闲置轮询总入口：先把没说完的段续完，再主动找话。
+async function maybeProactive() {
+  if (!state.proactiveEnabled) return;
+  if (!state.ready) return;
+  if (!state.currentSession) return;
+  if (state.sending || state.proactiveBusy) return;
+  // 语音录音 / 回话中不打扰。
+  if (typeof voice === 'object' && voice && voice.uiState && voice.uiState !== 'idle') return;
+  if (!$('messages').querySelector('.msg.user')) return;   // 无用户消息不主动
+  if (Date.now() - state.lastActivity < nextDelayMs()) return;
+
+  if (state.pendingSegments && state.pendingSegments.length > 0) {
+    await runContinue();        // 阶段一：续说
+    return;
+  }
+  if (state.proactiveCount >= state.proactiveMaxNudges) return;  // 已告别，停
+  await runProactive();         // 阶段二：主动找话
+}
+
+async function runContinue() {
+  state.proactiveBusy = true;
+  try {
+    const data = await api('/api/continue', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: state.currentSession }),
+    });
+    if (data && data.ok && data.reply) {
+      const wrap = appendMessage('assistant', data.reply, { meta: data.mood, proactive: true });
+      setBubbleMood(wrap, data.mood);
+      renderStateBar(data.mood);
+      state.lastMeta = data.mood || state.lastMeta;
+      if (data.usage) renderUsage(data.usage);
+      state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
+      await loadSessions();
+      scrollToBottom();
+    } else if (data && data.skipped) {
+      state.pendingSegments = [];
+    }
+  } catch (e) {
+    // 静默失败
+  } finally {
+    state.proactiveBusy = false;
+    afterNudge();   // 续说完才重置时间戳 → 下一段从此刻起再等 continue_base_ms
+  }
+}
+
+async function runProactive() {
+  const nextCount = state.proactiveCount + 1;
+  const isFarewell = nextCount >= state.proactiveMaxNudges;
+  const mode = isFarewell ? 'farewell' : 'engage';
+  state.proactiveBusy = true;
+  try {
+    const data = await api('/api/proactive', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: state.currentSession, mode }),
+    });
+    if (data && data.ok && data.reply) {
+      const wrap = appendMessage('assistant', data.reply, {
+        meta: data.mood, proactive: true, farewell: !!data.farewell,
+      });
+      setBubbleMood(wrap, data.mood);
+      renderStateBar(data.mood);
+      state.lastMeta = data.mood || state.lastMeta;
+      if (data.usage) renderUsage(data.usage);
+      await loadSessions();
+      scrollToBottom();
+      state.proactiveCount = nextCount;   // 推进退避档位
+    }
+  } catch (e) {
+    // 静默失败
+  } finally {
+    state.proactiveBusy = false;
+    afterNudge();
+  }
+}
+
+$('proactive-checkbox').addEventListener('change', (e) => setProactivePref(e.target.checked));
+$('proactive-interval').addEventListener('change', (e) => setProactiveInterval(e.target.value));
+$('proactive-max-nudges').addEventListener('change', (e) => setProactiveMaxNudges(e.target.value));
+$('quote-bar-clear').addEventListener('click', clearQuote);
+// 任何输入/聚焦都算"还在场"，刷新闲置计时
+$('input').addEventListener('input', resetIdle);
+$('input').addEventListener('focus', resetIdle);
+window.addEventListener('focus', resetIdle);
+
 (async function init() {
+  loadProactivePref();
   await refreshStatus();
   await loadVersions();   // populate the per-session dropdown
   await loadSessions();
@@ -2792,6 +3100,8 @@ $('mic-btn').addEventListener('click', onMicClick);
   // until they're ready so the status pill flips to 就绪 on its own.
   const vst = await voiceRefreshStatus();
   if (vst === 'loading') pollVoiceUntilReady();
+  // 闲置轮询：每 2s 检查一次是否该续说 / 主动发言。
+  setInterval(maybeProactive, PROACTIVE_POLL_MS);
 })();
 </script>
 </body>

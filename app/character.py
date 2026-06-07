@@ -12,11 +12,19 @@ Strategy:
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import anthropic
 
+from .controller import (
+    LinaController,
+    LinaPromptComposer,
+    LinaPromptPlan,
+    LinaTurnContext,
+)
 from .conversation import Conversation
 from .rag import CharacterRAG, Chunk, retrieve_history_chunks
 
@@ -32,6 +40,40 @@ MOOD_TAG_RE = re.compile(
     r"(?P<trust>\d+)\s*\]\s*\n?",
     re.IGNORECASE,
 )
+
+
+# Matches an optional trailing segment-plan tag like:
+#   [segments: 里面有半张烧焦的羊皮纸 || 上面的字我只认出三个]
+# The body before this tag is the FIRST segment (shown now); the items here
+# are the REMAINING segments' short outline points, parked for later
+# proactive continuation. Stripped from what the user sees.
+SEGMENTS_TAG_RE = re.compile(
+    r"\n?\s*\[\s*segments?\s*[:：]\s*(?P<body>.+?)\s*\]\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# How many remaining segments we allow. Caps "split long replies" so it
+# doesn't overshoot into "lina monologues for 6 turns".
+MAX_PENDING_SEGMENTS = 3
+
+
+def parse_segments_tag(raw: str) -> tuple[str, list[str]]:
+    """Strip a trailing [segments: A || B] tag from `raw`.
+
+    Returns (text_without_tag, [outline_points]). Absent tag → (raw, []).
+    Splits on `||` (also full-width ｜｜). Empty points dropped, capped at
+    MAX_PENDING_SEGMENTS.
+    """
+    if not raw:
+        return raw, []
+    m = SEGMENTS_TAG_RE.search(raw)
+    if not m:
+        return raw, []
+    body = m.group("body")
+    cleaned = raw[: m.start()].rstrip()
+    parts = [p.strip() for p in re.split(r"\s*\|\|\s*|\s*｜｜\s*", body)]
+    points = [p for p in parts if p][:MAX_PENDING_SEGMENTS]
+    return cleaned, points
 
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -225,6 +267,41 @@ MOOD_FORMAT_SPEC = """\
 """
 
 
+SEGMENT_PROTOCOL_SPEC = """\
+# 分段说话机制（机制要求，重要）
+
+你说话像发微信，不是写信。**一条消息只说一个意思、一两口气就发出去**，
+剩下想说的分多条接着发。绝不要把好几个意思、好几句追问堆进一大段。
+
+判断标准——只要满足任意一条，就**必须**分段：
+- 这一轮你想表达的内容包含**超过一个独立的意思**（比如：先回应对方 + 又抛一个自己的联想；或连着问两个不同的问题）；
+- 或者你发现自己这一段快要超过本轮的字数上限了。
+
+分段怎么做：
+- 这次的回复正文，**只说第一个意思那一小段**（照常 1-2 短行，照常带 [mood:…] 开头）。
+- 在回复的**最末尾**另起一行，用标记列出**剩下每一小段的要点**（不是完整句子，是几个字的提纲）：
+
+  [segments: 第二段的要点 || 第三段的要点]
+
+- 这一行只给系统读、会被删掉，用户看不到。系统会在用户没接话时，让你把这些
+  要点一段一段自然说完，中间用户随时插话就作废。
+
+约束：
+- 真的只有一个意思、一两口气能说完的短回复（问候、短反应、简单接话），就直接说完，**不要**硬凑分段。
+- 最多列 3 个要点。
+- 第一小段要能独立成立（用户不等后续也不突兀）。
+- 要点之间用 || 分隔。只有一个意思时不要输出这一行。
+
+反例（错误，绝不要这样——把三个意思堆成一大段）：
+  「哦是有人主动改的……那简化是怎么简化的？把笔画减少了？还是有些部分省掉了？那卷遗物上面混着方块字，我现在有点好奇那些是简体还是繁体了。」
+正确做法（第一段只说一个意思，其余 park 起来）：
+  正文：「哦——是有人主动去改的啊。」
+  [segments: 追问简化是怎么简化的、是减笔画还是省部分 || 联想到自己那卷混着方块字的遗物，好奇那些是简体还是繁体]
+
+
+"""
+
+
 SYSTEM_PROMPT_TEMPLATE = """\
 你将扮演一个角色：「西比莉娜」（Albertus Sibyllina，昵称"莉娜"）。
 以下是关于这个角色和她所在世界的完整设定。你必须严格依据这些设定进行扮演。
@@ -265,6 +342,15 @@ class ChatResult:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    # Per-turn controller decision + trace, surfaced for the inspector.
+    plan: dict | None = None
+    controller_trace: dict | None = None
+    # Remaining segment outline points this reply parked for later
+    # continuation (empty = not split). Web layer arms the continue timer
+    # on a non-empty list.
+    pending_segments: list[str] = field(default_factory=list)
+    # Marks a reply produced by continue_segment() (a follow-up chunk).
+    is_continuation: bool = False
 
 
 def parse_mood_tag(raw: str) -> tuple[str, dict | None]:
@@ -304,6 +390,7 @@ class CharacterEngine:
         retrieve_k: int = 4,
         history_retrieve_k: int = 3,
         overrides: dict[str, str] | None = None,
+        controller: LinaController | None = None,
     ):
         if not api_key:
             raise ValueError("Anthropic API key is required.")
@@ -312,12 +399,17 @@ class CharacterEngine:
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.max_tokens = max_tokens
+        # With a controller wired in, the per-turn Plan supplies these
+        # (overriding the instance defaults). Without one, they're used as-is.
         self.history_window = history_window
         self.retrieve_k = retrieve_k
         self.history_retrieve_k = history_retrieve_k
         self.overrides: dict[str, str] = dict(overrides or {})
         self.rag = CharacterRAG(self.static_dir, file_overrides=self._file_overrides())
         self._system_blocks = self._build_system_blocks()
+        # Controller is optional. None → pre-controller behavior preserved.
+        self._controller = controller
+        self._composer = LinaPromptComposer() if controller is not None else None
 
     def _file_overrides(self) -> dict[str, str]:
         """Subset of overrides that target static .md files."""
@@ -345,6 +437,10 @@ class CharacterEngine:
             prompt = (
                 f"{template}\n\n{self.rag.core_text}\n\n{behavior}\n\n{mood}"
             )
+        # Append the (optional) segment-splitting protocol. Stable text, so it
+        # stays inside the cached block and doesn't hurt cache hits. The model
+        # only emits a [segments:…] tag when splitting is appropriate.
+        prompt = f"{prompt}\n\n================\n# 五、{SEGMENT_PROTOCOL_SPEC}"
         # Single cached system block. Prompt caching needs at least ~1024
         # tokens; the character corpus is well above that.
         return [
@@ -355,6 +451,107 @@ class CharacterEngine:
             }
         ]
 
+    def _history_pairs_for_controller(self, conversation: Conversation) -> tuple[tuple[str, str], ...]:
+        """Turn the linear message list into (user, assistant) pairs for the
+        controller context. System-triggered placeholders (proactive /
+        farewell) are skipped so the controller sees only real exchanges."""
+        pairs: list[tuple[str, str]] = []
+        pending_user: str | None = None
+        for m in conversation.messages:
+            if m.role == "user":
+                if m.meta and m.meta.get("system_trigger"):
+                    continue
+                if pending_user is not None:
+                    pairs.append((pending_user, ""))
+                pending_user = (m.content or "").strip()
+            elif m.role == "assistant":
+                a_text = (m.content or "").strip()
+                if pending_user is not None:
+                    pairs.append((pending_user, a_text))
+                    pending_user = None
+                else:
+                    pairs.append(("", a_text))
+        if pending_user is not None:
+            pairs.append((pending_user, ""))
+        return tuple(pairs)
+
+    @staticmethod
+    def _gap_seconds(conversation: Conversation) -> float:
+        """Seconds since the last stored message. 0 if no history.
+
+        Used by the controller's welcome_back rule. We read the most recent
+        message's `ts` and diff against now. A genuinely fresh conversation
+        (no messages) returns 0 → never triggers welcome_back."""
+        if not conversation.messages:
+            return 0.0
+        last_ts = getattr(conversation.messages[-1], "ts", 0.0) or 0.0
+        return max(0.0, time.time() - float(last_ts))
+
+    def _dispatch_controller(
+        self,
+        user_message: str,
+        conversation: Conversation,
+        *,
+        is_proactive: bool = False,
+        is_farewell: bool = False,
+        is_continuation: bool = False,
+        has_cross_session_memory: bool = False,
+    ) -> tuple[LinaPromptPlan, dict[str, Any] | None]:
+        """Run controller and return (plan, trace). Without a controller
+        wired in, returns a `LinaPromptPlan` populated with the engine's
+        legacy defaults so the rest of the code path is identical."""
+        if self._controller is None:
+            plan = LinaPromptPlan(
+                retrieve_k=self.retrieve_k,
+                history_recall_k=self.history_retrieve_k,
+                history_window=self.history_window,
+                use_cross_session_memory=has_cross_session_memory,
+                trace_source="disabled",
+                matched_rule="controller_disabled",
+            )
+            return plan, None
+
+        has_prior_assistant = any(m.role == "assistant" for m in conversation.messages)
+        last_meta = conversation.last_assistant_meta() or {}
+        ctx = LinaTurnContext(
+            user_text=user_message,
+            history=self._history_pairs_for_controller(conversation),
+            session_id=getattr(conversation, "session_id", "") or "",
+            is_proactive=is_proactive,
+            is_farewell=is_farewell,
+            is_continuation=is_continuation,
+            is_first_turn=not has_prior_assistant,
+            has_cross_session_memory=has_cross_session_memory,
+            prior_trust=int(last_meta.get("trust", 3) or 3),
+            gap_seconds=self._gap_seconds(conversation),
+        )
+        plan = self._controller.dispatch_sync(ctx)
+        return plan, self._controller.last_trace
+
+    @staticmethod
+    def _filter_chunks_by_plan(chunks: list[Chunk], plan: LinaPromptPlan) -> list[Chunk]:
+        """Drop static chunks whose source file is disabled in the plan.
+
+        Run AFTER RAG retrieval so we don't change BM25 scoring; we just
+        suppress chunks the plan said we shouldn't use."""
+        allowed = set(plan.static_sources)
+        if not allowed:
+            return []
+        return [c for c in chunks if c.source in allowed]
+
+    def _build_dynamic_system_blocks(self, plan: LinaPromptPlan) -> list[dict]:
+        """Build optional second system block from the controller plan.
+
+        Returns an empty list when there's nothing dynamic to add (caller
+        then uses just the cached block — the pre-controller payload)."""
+        if self._composer is None:
+            return []
+        bundle = self._composer.compose(plan)
+        if not bundle.tail_text.strip():
+            return []
+        # Second block is NOT cache_control'd: it changes per turn.
+        return [{"type": "text", "text": bundle.tail_text}]
+
     def _build_user_content(
         self,
         user_message: str,
@@ -363,6 +560,7 @@ class CharacterEngine:
         prior_mood: dict | None,
         is_forced: bool = False,
         is_first_turn: bool = False,
+        quoted_text: str = "",
     ) -> str:
         sections: list[str] = []
 
@@ -411,32 +609,67 @@ class CharacterEngine:
                 "用户之前讲过的事实/偏好/承诺，请记住并保持一致；不要重复或复述。>\n"
                 f"{hist_text}\n</历史回忆>"
             )
+        # 用户像微信那样"引用"了莉娜之前的某条消息来回复——明确告诉模型
+        # 这一轮是针对哪句话说的，回复要承接那句，而不是泛泛而谈。
+        quoted = str(quoted_text or "").strip()
+        if quoted:
+            sections.append(
+                "<用户引用了你之前说过的这句话来回复 — 本轮请明确承接、回应这句，"
+                "不要答非所问>\n"
+                f"{quoted}\n</用户引用>"
+            )
         sections.append(f"<用户发言>\n{user_message}\n</用户发言>")
         if not sections[:-1]:  # only user message present, no context blocks
             return user_message
         return "\n\n".join(sections)
 
-    def _prepare(self, conversation: Conversation, user_message: str) -> dict:
-        """Shared setup for chat() and chat_stream(): RAG retrieval, mood
-        seeding, and the assembled API `messages` list. Pure (no mutation of
-        the conversation), so streaming can abort without side effects."""
-        retrieved = self.rag.retrieve(user_message, k=self.retrieve_k)
-
-        # Retrieve from older turns of THIS session that won't fit in the
-        # recent-history window — long-term memory of facts the user told.
-        retrieved_history = retrieve_history_chunks(
-            conversation.messages,
+    def _prepare(
+        self,
+        conversation: Conversation,
+        user_message: str,
+        *,
+        extra_memory_chunks: list[Chunk] | None = None,
+        quoted_text: str = "",
+    ) -> dict:
+        """Shared setup for chat() and chat_stream(): controller dispatch,
+        plan-driven RAG, mood seeding, the assembled API `messages` list, and
+        the (two-block) system payload. Pure (no mutation of the
+        conversation), so streaming can abort without side effects."""
+        # 1) Controller decides how to handle this turn.
+        plan, plan_trace = self._dispatch_controller(
             user_message,
-            k=self.history_retrieve_k,
-            exclude_recent_count=self.history_window,
+            conversation,
+            has_cross_session_memory=bool(extra_memory_chunks),
         )
 
-        # Read the most-recent mood tag from the conversation so the model
-        # has emotional momentum to work from. If the user has manually
-        # set a forced_state, overlay it on top with sensible defaults
-        # filling any gaps. If there's no prior mood at all (truly first
-        # turn, or model dropped the tag on past replies), seed with the
-        # documented defaults so trust=3 is enforced from turn 1.
+        # 2) RAG controlled by the plan (falls back to instance defaults when
+        #    no controller is wired in).
+        rag_query = plan.query_hint or user_message
+        retrieve_k = plan.retrieve_k if self._controller is not None else self.retrieve_k
+        retrieved_raw = self.rag.retrieve(rag_query, k=retrieve_k) if retrieve_k > 0 else []
+        retrieved = (
+            self._filter_chunks_by_plan(retrieved_raw, plan)
+            if self._controller is not None
+            else retrieved_raw
+        )
+
+        history_window = plan.history_window if self._controller is not None else self.history_window
+        history_recall_k = (
+            plan.history_recall_k if self._controller is not None else self.history_retrieve_k
+        )
+        retrieved_history: list[Chunk] = []
+        if plan.use_history_recall and history_recall_k > 0:
+            retrieved_history = retrieve_history_chunks(
+                conversation.messages,
+                rag_query,
+                k=history_recall_k,
+                exclude_recent_count=history_window,
+            )
+        # Cross-session user memory passed in by the caller (web layer).
+        if extra_memory_chunks and plan.use_cross_session_memory:
+            retrieved_history = list(extra_memory_chunks) + retrieved_history
+
+        # 3) Mood / first-turn / forced-state seeding (unchanged).
         prior_mood = conversation.last_assistant_meta()
         forced = conversation.forced_state
         has_prior_assistant = any(m.role == "assistant" for m in conversation.messages)
@@ -451,9 +684,7 @@ class CharacterEngine:
             prior_mood = {"mood": "平静", "intensity": 5, "trust": 3}
             is_first_turn = True
 
-        # Build the API messages: prior history (windowed) + new user turn.
-        # For assistant turns with a stored mood, prepend the mood tag back
-        # so the model sees its own past format and stays consistent.
+        # 4) Build the API messages: prior history (windowed) + new user turn.
         prior: list[dict] = []
         for m in conversation.messages:
             if m.role == "assistant" and m.meta:
@@ -461,8 +692,8 @@ class CharacterEngine:
                 prior.append({"role": "assistant", "content": f"{tag}\n{m.content}"})
             else:
                 prior.append({"role": m.role, "content": m.content})
-        if self.history_window > 0:
-            prior = prior[-self.history_window :]
+        if history_window > 0:
+            prior = prior[-history_window:]
         api_messages = prior + [
             {
                 "role": "user",
@@ -473,32 +704,55 @@ class CharacterEngine:
                     prior_mood,
                     is_forced=bool(forced),
                     is_first_turn=is_first_turn,
+                    quoted_text=quoted_text,
                 ),
             }
         ]
+        # 5) Two-segment system: cached block + plan-derived tail.
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
         return {
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
             "forced": forced,
             "api_messages": api_messages,
+            "system_blocks": system_blocks,
+            "plan": plan,
+            "plan_trace": plan_trace,
         }
 
-    def chat(self, conversation: Conversation, user_message: str) -> ChatResult:
-        prep = self._prepare(conversation, user_message)
+    def chat(
+        self,
+        conversation: Conversation,
+        user_message: str,
+        extra_memory_chunks: list[Chunk] | None = None,
+        quoted_text: str = "",
+    ) -> ChatResult:
+        prep = self._prepare(
+            conversation,
+            user_message,
+            extra_memory_chunks=extra_memory_chunks,
+            quoted_text=quoted_text,
+        )
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
+        plan = prep["plan"]
+        plan_trace = prep["plan_trace"]
 
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=self._system_blocks,
+            system=prep["system_blocks"],
             messages=prep["api_messages"],
         )
 
         text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
         raw_reply = "".join(text_parts).strip()
+        # Strip leading mood tag, then trailing segment-plan tag.
         cleaned_reply, mood = parse_mood_tag(raw_reply)
+        cleaned_reply, segments = parse_segments_tag(cleaned_reply)
+        # A fresh user turn invalidates any earlier split plan, installs this one.
+        conversation.pending_segments = segments or None
 
         # Persist user (raw) and assistant (cleaned, with mood as meta).
         conversation.add("user", user_message)
@@ -517,6 +771,9 @@ class CharacterEngine:
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            plan=plan.to_dict(),
+            controller_trace=plan_trace,
+            pending_segments=list(segments),
         )
 
     def chat_stream(self, conversation: Conversation, user_message: str):
@@ -542,18 +799,46 @@ class CharacterEngine:
         forced = prep["forced"]
 
         header_done = False  # have we parsed/stripped the [mood:] header line?
+        _ = prep  # system_blocks/plan used below
         header_buf = ""
         mood: dict | None = None
         cleaned_parts: list[str] = []
+        # Once a '[' appears in the body it MIGHT be the start of a trailing
+        # [segments:…] tag. We hold back text from that '[' onward (instead of
+        # streaming it as a delta) so the tag never shows in captions or gets
+        # spoken by TTS. At the end we decide: real segments tag → drop it;
+        # stray '[' → flush it as a final delta.
+        tail_buf = ""
 
         def _emit_header(buf: str):
             """Parse the mood tag off `buf`; return (mood, cleaned_visible_text)."""
             return parse_mood_tag(buf)
 
+        def _push_body(text: str):
+            """Stream body text as deltas, but hold back from any '[' (possible
+            segments-tag start). Yields delta events; returns nothing."""
+            nonlocal tail_buf
+            out = []
+            if tail_buf:
+                # Already holding back — keep accumulating, emit nothing.
+                tail_buf += text
+                return out
+            br = text.find("[")
+            if br < 0:
+                cleaned_parts.append(text)
+                out.append({"type": "delta", "text": text})
+            else:
+                before = text[:br]
+                if before:
+                    cleaned_parts.append(before)
+                    out.append({"type": "delta", "text": before})
+                tail_buf = text[br:]   # start holding back from the '['
+            return out
+
         with self.client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=self._system_blocks,
+            system=prep["system_blocks"],
             messages=prep["api_messages"],
         ) as stream:
             for delta in stream.text_stream:
@@ -567,25 +852,33 @@ class CharacterEngine:
                         cleaned, mood = _emit_header(header_buf)
                         header_done = True
                         yield {"type": "mood", "mood": mood}
-                        if cleaned:
-                            cleaned_parts.append(cleaned)
-                            yield {"type": "delta", "text": cleaned}
+                        for ev in _push_body(cleaned):
+                            yield ev
                     continue
-                cleaned_parts.append(delta)
-                yield {"type": "delta", "text": delta}
+                for ev in _push_body(delta):
+                    yield ev
 
             # Stream finished. If we never saw a newline (single-line reply or
             # a dropped tag), parse whatever we buffered now.
             if not header_done:
                 cleaned, mood = _emit_header(header_buf)
                 yield {"type": "mood", "mood": mood}
-                if cleaned:
-                    cleaned_parts.append(cleaned)
-                    yield {"type": "delta", "text": cleaned}
+                for ev in _push_body(cleaned):
+                    yield ev
 
             final = stream.get_final_message()
 
+        # Resolve the held-back tail: if it's a [segments:…] tag, strip it; if
+        # it was just stray bracketed text, flush it as one final delta.
+        segments: list[str] = []
+        if tail_buf:
+            tail_clean, segments = parse_segments_tag(tail_buf)
+            if tail_clean:
+                cleaned_parts.append(tail_clean)
+                yield {"type": "delta", "text": tail_clean}
+
         cleaned_full = "".join(cleaned_parts).strip()
+        conversation.pending_segments = segments or None
 
         # Reached only on normal completion — safe to persist.
         conversation.add("user", user_message)
@@ -600,6 +893,7 @@ class CharacterEngine:
             "mood": mood,
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
+            "pending_segments": list(segments),
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", 0) or 0,
                 "output_tokens": getattr(usage, "output_tokens", 0) or 0,
@@ -607,3 +901,283 @@ class CharacterEngine:
                 "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
             },
         }
+
+    # 主动发言指令：用户沉默时让莉娜根据近况主动开口。作为一条临时 user
+    # 轮注入，不入库；只有她的回复会被保存。
+    PROACTIVE_INSTRUCTION = (
+        "（系统提示，不要在回复里提到这段话，也不要说「你没回复」「你沉默了」之类。）\n"
+        "用户已经有一会儿没说话了。请你像真人一样，主动开口找点话说——"
+        "可以顺着你们刚才聊的话题继续问、补一句之前没说完的，或者抛个新的小话头/小八卦。"
+        "保持你一贯的口吻和当前的情绪、信任度，照常用 [mood:…] 开头。"
+        "不要长篇大论，自然地起个话头就好。"
+    )
+
+    def proactive(
+        self,
+        conversation: Conversation,
+        extra_memory_chunks: list[Chunk] | None = None,
+    ) -> ChatResult:
+        return self._run_proactive(
+            conversation,
+            instruction=self.PROACTIVE_INSTRUCTION,
+            mode="engage",
+            extra_memory_chunks=extra_memory_chunks,
+            is_farewell=False,
+        )
+
+    # 告别指令：用户连续多次没回应主动搭话时，让莉娜自然地结束话题。
+    # 与 PROACTIVE_INSTRUCTION 并列，作为另一种"主动开口"的语气。
+    FAREWELL_INSTRUCTION = (
+        "（系统提示，不要在回复里提到这段话，也不要解释这是系统提示。）\n"
+        "你已经主动找过用户搭话好几次了，他/她都没回。看来今天他/她不在状态、"
+        "或者有事忙别的去了。请你自然地结束这次对话——按你一贯的口吻说几句告别："
+        "比如你也要回去看草药、做实验、整理瓶子、有事忙了，改天再聊。"
+        "可以略带一点失落、释然、或者装作满不在乎都行。短一两行就好。"
+        "照常用 [mood:…] 开头。"
+    )
+
+    def proactive_farewell(
+        self,
+        conversation: Conversation,
+        extra_memory_chunks: list[Chunk] | None = None,
+    ) -> ChatResult:
+        return self._run_proactive(
+            conversation,
+            instruction=self.FAREWELL_INSTRUCTION,
+            mode="farewell",
+            extra_memory_chunks=extra_memory_chunks,
+            is_farewell=True,
+        )
+
+    def _run_proactive(
+        self,
+        conversation: Conversation,
+        *,
+        instruction: str,
+        mode: str,
+        extra_memory_chunks: list[Chunk] | None,
+        is_farewell: bool,
+    ) -> ChatResult:
+        """Shared body for proactive() and proactive_farewell().
+
+        Same shape as chat() but injects a synthetic user instruction
+        instead of a real user message. The controller is invoked with
+        is_proactive=True (and is_farewell=True for the farewell path)
+        so the rule layer can fire `proactive_engage` / `proactive_farewell`.
+        """
+        last_user_text = ""
+        for m in reversed(conversation.messages):
+            if m.role == "user" and not (m.meta and m.meta.get("system_trigger")):
+                last_user_text = m.content or ""
+                break
+
+        plan, plan_trace = self._dispatch_controller(
+            last_user_text,
+            conversation,
+            is_proactive=True,
+            is_farewell=is_farewell,
+            has_cross_session_memory=bool(extra_memory_chunks),
+        )
+
+        # B 级（MapDia/PaRT）：engage 路径上，先让 controller 从最近历史里挑一个
+        # 最值得重提、且与用户相关的话头，用它驱动这次主动开口。告别路径不挑。
+        topic_hook = ""
+        topic_query = ""
+        if (not is_farewell) and self._controller is not None and self._controller.has_llm:
+            try:
+                ctx = LinaTurnContext(
+                    user_text=last_user_text,
+                    history=self._history_pairs_for_controller(conversation),
+                    is_proactive=True,
+                )
+                picked = self._controller.pick_proactive_topic_sync(ctx)
+                topic_hook = (picked or {}).get("topic_hook", "") or ""
+                topic_query = (picked or {}).get("query_hint", "") or ""
+            except Exception:
+                pass  # 挑话头失败不影响主动发言，退回规则的静态 query_hint
+
+        # 挑到话头：① 检索 query 优先用它（更聚焦）；② 指令里点名让莉娜去捡它。
+        if topic_hook:
+            instruction = (
+                f"{instruction}\n"
+                f"这次主动开口，就顺着这个话头来——「{topic_hook}」。"
+                f"自然地把它重新捡起来，让用户感觉你记着、惦记着；不要生硬地宣布换话题。"
+            )
+
+        rag_query = topic_query or plan.query_hint or last_user_text
+        retrieve_k = plan.retrieve_k if self._controller is not None else self.retrieve_k
+        retrieved_raw = (
+            self.rag.retrieve(rag_query, k=retrieve_k) if rag_query and retrieve_k > 0 else []
+        )
+        retrieved = (
+            self._filter_chunks_by_plan(retrieved_raw, plan)
+            if self._controller is not None
+            else retrieved_raw
+        )
+
+        history_window = plan.history_window if self._controller is not None else self.history_window
+        history_recall_k = (
+            plan.history_recall_k if self._controller is not None else self.history_retrieve_k
+        )
+        retrieved_history: list[Chunk] = []
+        if plan.use_history_recall and history_recall_k > 0 and rag_query:
+            retrieved_history = retrieve_history_chunks(
+                conversation.messages,
+                rag_query,
+                k=history_recall_k,
+                exclude_recent_count=history_window,
+            )
+        if extra_memory_chunks and plan.use_cross_session_memory:
+            retrieved_history = list(extra_memory_chunks) + retrieved_history
+
+        prior_mood = conversation.last_assistant_meta()
+        if not prior_mood:
+            prior_mood = {"mood": "平静", "intensity": 5, "trust": 3}
+
+        prior: list[dict] = []
+        for m in conversation.messages:
+            if m.role == "assistant" and m.meta:
+                tag = f"[mood: {m.meta.get('mood', '?')} | {m.meta.get('intensity', 5)} | 信任={m.meta.get('trust', 3)}]"
+                prior.append({"role": "assistant", "content": f"{tag}\n{m.content}"})
+            else:
+                prior.append({"role": m.role, "content": m.content})
+        if history_window > 0:
+            prior = prior[-history_window:]
+
+        composed_instruction = self._build_user_content(
+            instruction, retrieved, retrieved_history, prior_mood
+        )
+        api_messages = prior + [{"role": "user", "content": composed_instruction}]
+
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system_blocks,
+            messages=api_messages,
+        )
+
+        text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
+        raw_reply = "".join(text_parts).strip()
+        cleaned_reply, mood = parse_mood_tag(raw_reply)
+
+        conversation.add("user", instruction, meta={"system_trigger": True, "mode": mode})
+        meta = dict(mood) if mood else {}
+        meta["proactive"] = True
+        if is_farewell:
+            meta["farewell"] = True
+        conversation.add("assistant", cleaned_reply, meta=meta)
+
+        usage = response.usage
+        return ChatResult(
+            text=cleaned_reply,
+            retrieved=retrieved,
+            retrieved_history=retrieved_history,
+            mood=mood,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            plan=plan.to_dict(),
+            controller_trace=plan_trace,
+        )
+
+    # 续说指令：把上一条回复 parse 出来的某个小段要点，自然展开成一小段。
+    # {point} 由 continue_segment() 填入。
+    CONTINUE_INSTRUCTION = (
+        "（系统提示，不要在回复里提到这段话，也不要说「接下来」「继续」之类的元叙述。）\n"
+        "你上一条话还没说完，现在自然地接着往下说一小段，围绕这个要点：\n"
+        "{point}\n"
+        "像发微信补一条那样，直接接着上一段的语气往下说，不要重新打招呼、"
+        "不要重复刚说过的、不要总结。短，1-2 行就好。照常用 [mood:…] 开头。"
+    )
+
+    def continue_segment(
+        self,
+        conversation: Conversation,
+        extra_memory_chunks: list[Chunk] | None = None,
+    ) -> ChatResult | None:
+        """Deliver the next parked segment as a short follow-up message.
+
+        Pops the first outline point from `conversation.pending_segments`,
+        asks the model to expand it into one short line, and persists it
+        like a proactive turn. Returns None if there's nothing pending
+        (the web layer treats None as "stop the continue timer").
+
+        Structurally mirrors _run_proactive but routes through the
+        controller with is_continuation=True (→ the `continuation` rule:
+        very short, no re-retrieval, tone follows the prior segment).
+        """
+        pending = list(conversation.pending_segments or [])
+        if not pending:
+            return None
+        point = pending.pop(0)
+        # Consume immediately so a crash mid-turn doesn't replay this point.
+        conversation.pending_segments = pending or None
+
+        plan, plan_trace = self._dispatch_controller(
+            point,
+            conversation,
+            is_continuation=True,
+            has_cross_session_memory=bool(extra_memory_chunks),
+        )
+
+        prior_mood = conversation.last_assistant_meta()
+        if not prior_mood:
+            prior_mood = {"mood": "平静", "intensity": 5, "trust": 3}
+
+        history_window = plan.history_window if self._controller is not None else self.history_window
+        prior: list[dict] = []
+        for m in conversation.messages:
+            if m.role == "assistant" and m.meta:
+                tag = f"[mood: {m.meta.get('mood', '?')} | {m.meta.get('intensity', 5)} | 信任={m.meta.get('trust', 3)}]"
+                prior.append({"role": "assistant", "content": f"{tag}\n{m.content}"})
+            else:
+                prior.append({"role": m.role, "content": m.content})
+        if history_window > 0:
+            prior = prior[-history_window:]
+
+        # Continuation doesn't re-retrieve (the material was fixed last turn),
+        # so no static/history chunks — just the state + the instruction.
+        instruction = self.CONTINUE_INSTRUCTION.format(point=point)
+        composed = self._build_user_content(instruction, [], [], prior_mood)
+        api_messages = prior + [{"role": "user", "content": composed}]
+
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system_blocks,
+            messages=api_messages,
+        )
+
+        text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
+        raw_reply = "".join(text_parts).strip()
+        cleaned_reply, mood = parse_mood_tag(raw_reply)
+        # A continuation must not itself spawn more segments — strip & ignore
+        # any segment tag it might emit, so we don't recurse indefinitely.
+        cleaned_reply, _ = parse_segments_tag(cleaned_reply)
+
+        conversation.add(
+            "user", instruction, meta={"system_trigger": True, "mode": "continue"}
+        )
+        meta = dict(mood) if mood else {}
+        meta["proactive"] = True
+        meta["continuation"] = True
+        conversation.add("assistant", cleaned_reply, meta=meta)
+
+        usage = response.usage
+        return ChatResult(
+            text=cleaned_reply,
+            retrieved=[],
+            retrieved_history=[],
+            mood=mood,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            plan=plan.to_dict(),
+            controller_trace=plan_trace,
+            pending_segments=list(conversation.pending_segments or []),
+            is_continuation=True,
+        )
