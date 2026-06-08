@@ -69,6 +69,12 @@ class Conversation:
     # scope the sidebar so testers on a shared public URL only see their own
     # sessions. None = legacy/untagged (won't appear in any client's list).
     client_id: str | None = None
+    # Remaining segments of a reply that was split into chunks. The first
+    # chunk is sent immediately as the reply; the rest are short outline
+    # points parked here and delivered one at a time via continue_segment()
+    # when the user stays silent. Cleared the moment the user speaks again
+    # (a new chat() turn) — a fresh message makes the old plan stale.
+    pending_segments: list[str] | None = None
 
     def add(self, role: str, content: str, meta: dict | None = None) -> Message:
         msg = Message(role=role, content=content, meta=meta)
@@ -101,6 +107,8 @@ class Conversation:
             d["forced_state"] = self.forced_state
         if self.client_id:
             d["client_id"] = self.client_id
+        if self.pending_segments:
+            d["pending_segments"] = self.pending_segments
         return d
 
     @classmethod
@@ -114,6 +122,7 @@ class Conversation:
             prompt_overrides=d.get("prompt_overrides"),
             forced_state=d.get("forced_state"),
             client_id=d.get("client_id"),
+            pending_segments=d.get("pending_segments"),
             messages=[Message.from_dict(m) for m in d.get("messages", [])],
         )
 

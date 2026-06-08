@@ -20,12 +20,24 @@ from pathlib import Path
 import json
 
 import anthropic
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, session
 
 from . import character as character_mod
+from .auth import UserStore
 from .character import CharacterEngine, DEFAULT_MODEL
-from .config import CONVERSATIONS_DIR, PROJECT_ROOT, STATIC_DIR, resolve_api_key
+from .config import (
+    CONVERSATIONS_DIR,
+    PROJECT_ROOT,
+    STATIC_DIR,
+    USERS_FILE,
+    resolve_api_key,
+    resolve_openai_api_key,
+    resolve_proactive_pacing,
+    resolve_secret_key,
+)
+from .controller import LinaController, build_default_controller
 from .conversation import ConversationStore
+from .rag import retrieve_user_memory_chunks
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
@@ -39,10 +51,40 @@ _CURRENT_KEY = "_current_"
 # connecting never overrides another's key. Engine-pool keys are prefixed with
 # the client id (`<cid>\x00<prompt-source>`) so engines never cross clients.
 _engine_pool: dict[str, CharacterEngine] = {}
-_client_creds: dict[str, dict] = {}   # cid -> {"key": str, "model": str}
+_client_creds: dict[str, dict] = {}   # identity(user_id) -> {"key": str, "model": str}
 _ANON_CLIENT = "_anon_"               # bucket for header-less (curl/admin) calls
 _engine_lock = threading.Lock()
 _store = ConversationStore(CONVERSATIONS_DIR)
+
+# ---- 强制账号登录 ----
+# 必须登录才能聊。登录态存 Flask 签名 cookie（session["user_id"]）。
+# 登录后「身份」就是 user_id —— 会话按 user_id 打标隔离、检索按 user_id 隔离、
+# 引擎凭证按 user_id 注册（统一用服务端 key，用户不再自己输 key）。
+_user_store = UserStore(USERS_FILE)
+# 这些 /api 路径无需登录即可访问；其余 /api 一律要求已登录。
+_PUBLIC_API_PATHS = {
+    "/api/status",
+    "/api/login",
+    "/api/register",
+    "/api/logout",
+    "/api/whoami",
+}
+
+# Shared per-turn decision controller (rule layer + gpt-5-mini advisors).
+# Stateless config — safe to share across all clients. Built once from
+# OPENAI_API_KEY; `None`-LLM fallback is fine (rules-only still works).
+_controller: LinaController | None = None
+
+
+def _ensure_controller() -> LinaController | None:
+    """Lazily build the shared LinaController. Safe to call repeatedly."""
+    global _controller
+    if _controller is not None:
+        return _controller
+    with _engine_lock:
+        if _controller is None:
+            _controller = build_default_controller(api_key=resolve_openai_api_key())
+        return _controller
 
 # ---------- Prompt-override layer ----------
 # Editable from the web UI. Stored locally (gitignored), reapplied on
@@ -311,12 +353,26 @@ def _validate_key(key: str, model: str) -> tuple[bool, str | None]:
 
 
 def _client_id() -> str | None:
-    """Per-browser id (random, stored in the browser's localStorage) used to
-    scope the session list on a shared public URL so testers only see their
-    own chats. Sent as the `X-Client-Id` header by the web UI. This is a
-    convenience boundary for multi-user testing, not a security control."""
-    cid = (request.headers.get("X-Client-Id") or request.args.get("client_id") or "").strip()
-    return cid or None
+    """当前身份 = 登录用户的 user_id（来自签名 cookie）。
+
+    强制登录后，整套下游（会话隔离、跨会话记忆、引擎凭证、引擎池 key）都以
+    user_id 作为「身份」。未登录返回 None —— before_request 守卫会先把未登录
+    的 /api 请求挡在外面，所以受守卫保护的端点里这里必定非空。"""
+    return session.get("user_id")
+
+
+def _cross_session_memory(cid: str | None, current_session_id: str, query: str, k: int = 3):
+    """跨会话长期记忆：检索**同一 client_id** 的其它会话里讲过的事。
+
+    严格按 client_id 过滤 → 不同用户（不同浏览器 id）的会话物理隔离，
+    一个用户绝不会检索到另一个用户的记忆。cid 为空（匿名/curl）时不检索，
+    避免把所有匿名会话混在一起。"""
+    if not cid or not query.strip():
+        return []
+    own = [c for c in _store.iter_sessions() if getattr(c, "client_id", None) == cid]
+    if not own:
+        return []
+    return retrieve_user_memory_chunks(own, query, k=k, current_session_id=current_session_id)
 
 
 def _set_credentials(cid: str, api_key: str, model: str = DEFAULT_MODEL) -> None:
@@ -369,6 +425,7 @@ def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
             static_dir=STATIC_DIR,
             model=creds["model"],
             overrides=_effective_overrides_for(conv),
+            controller=_ensure_controller(),
         )
         _engine_pool[key] = engine
         return engine
@@ -396,21 +453,43 @@ def _invalidate_session_engine(session_id: str) -> None:
     _pop_engines_with_suffix("\x00sess:" + session_id)
 
 
+def _register_server_creds(user_id: str) -> bool:
+    """登录后给该 user_id 注册服务端统一 key（用户不用自己输 key）。
+    成功返回 True；服务器没配默认 key 时返回 False。"""
+    default_key = resolve_api_key()
+    if not default_key:
+        return False
+    _set_credentials(user_id, default_key, model=DEFAULT_MODEL)
+    return True
+
+
 def create_app() -> Flask:
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).parent / "templates"),
         static_folder=str(Path(__file__).parent / "static_web"),
     )
+    # 签名 cookie 密钥（登录态存这里）。
+    app.secret_key = resolve_secret_key()
+
+    # 强制登录：除少数公开端点外，所有 /api/ 都要求已登录。
+    @app.before_request
+    def _enforce_login():
+        p = request.path
+        if p.startswith("/api/") and p not in _PUBLIC_API_PATHS:
+            if not session.get("user_id"):
+                return jsonify({"ok": False, "error": "请先登录。"}), 401
+            # 已登录但凭证还没注册（如服务重启后 cookie 仍在）→ 补注册服务端 key。
+            if session["user_id"] not in _client_creds:
+                _register_server_creds(session["user_id"])
 
     # Load any persisted overrides from the gitignored local folder.
     global _overrides
     _overrides = _load_overrides_from_disk()
 
-    # NOTE: we intentionally do NOT auto-connect from env / ~/.lina_key at
-    # startup. The server boots unauthenticated so every visitor must supply a
-    # working API key. The server-side default key (env ANTHROPIC_API_KEY /
-    # ~/.lina_key) is reachable ONLY via the hidden "0" shortcut in /api/auth.
+    # Build the shared controller eagerly so any startup error (bad OpenAI
+    # key, missing dep) shows in the server log, not on the first chat.
+    _ensure_controller()
 
     # Pre-load the ASR/TTS models at startup (in a background thread) so the
     # mic is ready without a cold ~30s wait on the first click. Set
@@ -425,15 +504,66 @@ def create_app() -> Flask:
     def index():
         return render_template("chat.html")
 
+    # ---------- 账号登录 / 注册 ----------
+
+    @app.route("/api/whoami", methods=["GET"])
+    def whoami():
+        uid = session.get("user_id")
+        return jsonify({"logged_in": bool(uid), "user_id": uid, "username": session.get("username")})
+
+    @app.route("/api/register", methods=["POST"])
+    def register():
+        data = request.get_json(force=True, silent=True) or {}
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+        ok, result = _user_store.register(username, password)
+        if not ok:
+            return jsonify({"ok": False, "error": result}), 400
+        # 注册即登录。
+        session["user_id"] = result
+        session["username"] = username
+        session.permanent = True
+        if not _register_server_creds(result):
+            return jsonify({"ok": False, "error": "服务器未配置默认 API Key，无法聊天。"}), 500
+        return jsonify({"ok": True, "user_id": result, "username": username})
+
+    @app.route("/api/login", methods=["POST"])
+    def login():
+        data = request.get_json(force=True, silent=True) or {}
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+        user_id = _user_store.verify(username, password)
+        if not user_id:
+            return jsonify({"ok": False, "error": "用户名或密码错误"}), 401
+        session["user_id"] = user_id
+        session["username"] = username
+        session.permanent = True
+        if not _register_server_creds(user_id):
+            return jsonify({"ok": False, "error": "服务器未配置默认 API Key，无法聊天。"}), 500
+        return jsonify({"ok": True, "user_id": user_id, "username": username})
+
+    @app.route("/api/logout", methods=["POST"])
+    def logout():
+        session.pop("user_id", None)
+        session.pop("username", None)
+        return jsonify({"ok": True})
+
     @app.route("/api/status")
     def status():
-        cid = _client_id() or _ANON_CLIENT
-        creds = _client_creds.get(cid)
+        uid = session.get("user_id")
+        ctrl = _ensure_controller()
         return jsonify(
             {
-                "ready": creds is not None,
-                "model": creds["model"] if creds else None,
+                "ready": bool(uid),
+                "logged_in": bool(uid),
+                "username": session.get("username"),
+                "model": DEFAULT_MODEL if uid else None,
                 "default_model": DEFAULT_MODEL,
+                "controller": {
+                    "enabled": ctrl is not None,
+                    "has_llm": bool(ctrl and ctrl.has_llm),
+                },
+                "proactive_pacing": resolve_proactive_pacing(),
             }
         )
 
@@ -729,6 +859,8 @@ def create_app() -> Flask:
         data = request.get_json(force=True, silent=True) or {}
         session_id = (data.get("session_id") or "").strip()
         message = (data.get("message") or "").strip()
+        # 可选：用户像微信那样引用了莉娜之前的某条消息来回复。限长防滥用。
+        quoted_text = (data.get("quoted_text") or "").strip()[:500]
         if not session_id:
             return jsonify({"ok": False, "error": "缺少 session_id"}), 400
         if not message:
@@ -746,8 +878,13 @@ def create_app() -> Flask:
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
 
+        # 跨会话用户记忆：让莉娜记住该用户（同 client_id）在别的会话里讲过的事。
+        extra_memory = _cross_session_memory(cid, session_id, message)
+
         try:
-            result = engine.chat(conv, message)
+            result = engine.chat(
+                conv, message, extra_memory_chunks=extra_memory, quoted_text=quoted_text
+            )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
@@ -768,6 +905,118 @@ def create_app() -> Flask:
                     {"source": c.source, "heading": c.heading, "text": c.text}
                     for c in result.retrieved_history
                 ],
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
+                "pending_segments": result.pending_segments,
+                "has_more_segments": bool(result.pending_segments),
+                "usage": {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "cache_creation_input_tokens": result.cache_creation_tokens,
+                    "cache_read_input_tokens": result.cache_read_tokens,
+                },
+            }
+        )
+
+    @app.route("/api/continue", methods=["POST"])
+    def continue_segment():
+        """续说：把上一条回复没说完的下一小段说出来。前端在收到
+        has_more_segments=true 后用短计时器调它；用户发新消息会自然作废。"""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "引擎未就绪。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+
+        conv = _store.load(session_id)
+        if not conv.pending_segments:
+            return jsonify({"ok": True, "skipped": True, "reason": "no_pending_segments"})
+
+        engine = _engine_for_session(conv, cid)
+        if engine is None:
+            return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+        try:
+            result = engine.continue_segment(conv)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        if result is None:
+            return jsonify({"ok": True, "skipped": True, "reason": "no_pending_segments"})
+        _store.save(conv)
+
+        return jsonify(
+            {
+                "ok": True,
+                "continuation": True,
+                "reply": result.text,
+                "mood": result.mood,
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
+                "pending_segments": result.pending_segments,
+                "has_more_segments": bool(result.pending_segments),
+                "usage": {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "cache_creation_input_tokens": result.cache_creation_tokens,
+                    "cache_read_input_tokens": result.cache_read_tokens,
+                },
+            }
+        )
+
+    @app.route("/api/proactive", methods=["POST"])
+    def proactive():
+        """用户闲置时由前端计时器触发：莉娜主动发言。
+        body.mode: "engage"（默认，抛话头）/ "farewell"（多次未回应后告别）。"""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "引擎未就绪。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+        mode = (data.get("mode") or "engage").strip().lower()
+        if mode not in ("engage", "farewell"):
+            mode = "engage"
+
+        conv = _store.load(session_id)
+        # 没有任何用户历史就不主动发言（避免硬造话题）。
+        if not any(m.role == "user" for m in conv.messages):
+            return jsonify({"ok": True, "skipped": True, "reason": "no_history"})
+
+        # 权威停止：本轮（上一条真实用户消息之后）如果已经告别过，就不再主动。
+        # 防止前端计数漂移导致告别后还反复发起。
+        for m in reversed(conv.messages):
+            if m.role == "user" and not (m.meta and m.meta.get("system_trigger")):
+                break
+            if m.role == "assistant" and m.meta and m.meta.get("farewell"):
+                return jsonify({"ok": True, "skipped": True, "reason": "already_farewelled"})
+
+        engine = _engine_for_session(conv, cid)
+        if engine is None:
+            return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+        try:
+            if mode == "farewell":
+                result = engine.proactive_farewell(conv)
+            else:
+                result = engine.proactive(conv)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        _store.save(conv)
+
+        # 真正是不是告别，由后端权威计数决定（可能覆盖了请求的 mode）。读最后一条
+        # assistant 的 meta 为准，让前端据此停止后续主动。
+        did_farewell = bool((conv.last_assistant_meta() or {}).get("farewell"))
+        return jsonify(
+            {
+                "ok": True,
+                "proactive": True,
+                "mode": "farewell" if did_farewell else "engage",
+                "farewell": did_farewell,
+                "reply": result.text,
+                "mood": result.mood,
+                "plan": result.plan,
+                "controller_trace": result.controller_trace,
                 "usage": {
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,

@@ -9,3 +9,6 @@ conversations/*.json
 .claude/settings.local.json
 prompt_overrides/
 certs/
+users/
+*.bak
+conversations/users/
