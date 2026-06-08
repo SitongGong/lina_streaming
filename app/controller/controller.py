@@ -106,11 +106,15 @@ class LinaController:
         clash with a host that already has one running (Flask, anyio)."""
         return asyncio.run(self.dispatch(ctx))
 
-    def pick_proactive_topic_sync(self, ctx: LinaTurnContext) -> dict[str, Any]:
+    def pick_proactive_topic_sync(
+        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
+    ) -> dict[str, Any]:
         """Sync wrapper for pick_proactive_topic."""
-        return asyncio.run(self.pick_proactive_topic(ctx))
+        return asyncio.run(self.pick_proactive_topic(ctx, avoid_hooks=avoid_hooks, stage=stage))
 
-    async def pick_proactive_topic(self, ctx: LinaTurnContext) -> dict[str, Any]:
+    async def pick_proactive_topic(
+        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
+    ) -> dict[str, Any]:
         """Pick ONE past thread worth resurfacing for a proactive opener.
 
         Distilled from MapDia (#9, learned topic-retrieval) + PaRT (#4,
@@ -133,7 +137,32 @@ class LinaController:
         template = load_prompt("controller/proactive_topic.txt")
         if not template:
             return empty
-        prompt = template.format(history_text=_render_history(ctx.history, limit=6))
+        avoid = [h for h in (avoid_hooks or []) if h]
+        avoid_text = (
+            "（已经主动抛过下面这些话头，这次必须换一个，不要重复）：\n"
+            + "\n".join(f"- {h}" for h in avoid)
+        ) if avoid else "（暂无，自由选择）"
+        # 分级策略：随主动次数升级，从"最近话题"→"更早话题"→"莉娜自己的经历"。
+        stage_text = {
+            "recent": (
+                "本次策略【接最近话题】：挑你们**最近一两轮**里提到、但还没聊透的话头，"
+                "顺着它自然往下问。"
+            ),
+            "earlier": (
+                "本次策略【翻更早的话题】：最近的话头对方没接，这次**跳过最近几轮**，"
+                "从**更早**的对话里挑一个用户提过、还算有意思的话题重新捡起来。"
+            ),
+            "self": (
+                "本次策略【说你自己的事】：用户对共同话题似乎没兴趣了。这次**不挑用户的话题**，"
+                "改成你（莉娜）主动抛一件**自己的**经历/见闻/小八卦（炼金、遗物、戏剧、香草这类），"
+                "结合你的人设自由发挥，留个钩子等对方接。topic_hook 写你要讲的那件事。"
+            ),
+        }.get(stage, "")
+        prompt = template.format(
+            history_text=_render_history(ctx.history, limit=8),
+            avoid_text=avoid_text,
+            stage_text=stage_text,
+        )
         try:
             resp = await asyncio.wait_for(
                 self._client.chat.completions.create(

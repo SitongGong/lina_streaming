@@ -971,6 +971,23 @@ class CharacterEngine:
                 last_user_text = m.content or ""
                 break
 
+        # 统计「上一条真实用户消息之后」已经发生了几次主动发言。这是**权威计数**
+        # （存在会话历史里），不依赖前端内存——前端刷新/不同步都不会让它出错。
+        prior_proactive = 0
+        for m in reversed(conversation.messages):
+            if m.role == "user" and not (m.meta and m.meta.get("system_trigger")):
+                break  # 到了最近一条真实用户消息，停止往回数
+            if m.role == "assistant" and m.meta and m.meta.get("proactive"):
+                prior_proactive += 1
+
+        # 告别由后端按权威计数决定，覆盖调用方传入的 is_farewell：已经主动过
+        # (max_nudges - 1) 次，这一次就是第 max_nudges 次 → 告别。这样无论前端
+        # 计数怎么漂，都不会出现「主动很多次也不告别」。
+        from .config import resolve_proactive_pacing
+        max_nudges = int(resolve_proactive_pacing().get("max_nudges", 4) or 4)
+        if prior_proactive >= max_nudges - 1:
+            is_farewell = True
+
         plan, plan_trace = self._dispatch_controller(
             last_user_text,
             conversation,
@@ -979,18 +996,31 @@ class CharacterEngine:
             has_cross_session_memory=bool(extra_memory_chunks),
         )
 
-        # B 级（MapDia/PaRT）：engage 路径上，先让 controller 从最近历史里挑一个
-        # 最值得重提、且与用户相关的话头，用它驱动这次主动开口。告别路径不挑。
+        # 分级话题来源：第 1 次接最近话题、第 2 次翻更早话题、第 3 次起说莉娜
+        # 自己的经历。（告别路径不挑话头。）
+        stage = {0: "recent", 1: "earlier"}.get(prior_proactive, "self")
+
+        # B 级（MapDia/PaRT）：engage 路径上，先让 controller 按当前 stage 从历史里
+        # 挑一个最值得重提的话头（或 self 级抛莉娜自己的事），驱动这次主动开口。
         topic_hook = ""
         topic_query = ""
         if (not is_farewell) and self._controller is not None and self._controller.has_llm:
             try:
+                # 收集本会话之前主动发言已经抛过的话头，传给挑选器去重，
+                # 避免连续几次主动发言内容雷同。
+                avoid_hooks = [
+                    m.meta["topic_hook"]
+                    for m in conversation.messages
+                    if m.role == "assistant" and m.meta and m.meta.get("topic_hook")
+                ]
                 ctx = LinaTurnContext(
                     user_text=last_user_text,
                     history=self._history_pairs_for_controller(conversation),
                     is_proactive=True,
                 )
-                picked = self._controller.pick_proactive_topic_sync(ctx)
+                picked = self._controller.pick_proactive_topic_sync(
+                    ctx, avoid_hooks=avoid_hooks, stage=stage
+                )
                 topic_hook = (picked or {}).get("topic_hook", "") or ""
                 topic_query = (picked or {}).get("query_hint", "") or ""
             except Exception:
@@ -1060,12 +1090,17 @@ class CharacterEngine:
         text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
         raw_reply = "".join(text_parts).strip()
         cleaned_reply, mood = parse_mood_tag(raw_reply)
+        # 主动发言本身就是「主动开口一小句」，不该再分段。剥掉并丢弃模型若误带的
+        # [segments:…] 标记，避免它露在气泡里。
+        cleaned_reply, _ = parse_segments_tag(cleaned_reply)
 
         conversation.add("user", instruction, meta={"system_trigger": True, "mode": mode})
         meta = dict(mood) if mood else {}
         meta["proactive"] = True
         if is_farewell:
             meta["farewell"] = True
+        if topic_hook:
+            meta["topic_hook"] = topic_hook   # 记下本次话头，供下次去重
         conversation.add("assistant", cleaned_reply, meta=meta)
 
         usage = response.usage
@@ -1162,7 +1197,8 @@ class CharacterEngine:
             "user", instruction, meta={"system_trigger": True, "mode": "continue"}
         )
         meta = dict(mood) if mood else {}
-        meta["proactive"] = True
+        # 续说只标 continuation（不是主动找话，不标 proactive）——前端据此显示
+        # 「· 接着说」而非「· 主动」。
         meta["continuation"] = True
         conversation.add("assistant", cleaned_reply, meta=meta)
 

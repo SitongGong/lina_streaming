@@ -1118,12 +1118,16 @@
   }
   .proactive-config input[type="number"]:focus { outline: none; border-color: var(--accent-soft); }
   .proactive-config.disabled { opacity: 0.35; pointer-events: none; }
-  /* 主动 / 告别消息的角标 */
+  /* 主动 / 告别 / 续说 消息的角标 */
   .msg.proactive .role-row .role::after {
     content: "· 主动"; color: var(--gold); font-size: 11px; margin-left: 4px;
   }
   .msg.proactive.farewell .role-row .role::after {
     content: "· 告别"; color: var(--accent);
+  }
+  /* 续说：上一条回复没说完、接着补的小段。不是主动找话，单独标。 */
+  .msg.continuation .role-row .role::after {
+    content: "· 接着说"; color: var(--ink-faint); font-size: 11px; margin-left: 4px;
   }
   /* ---- 引用回复 ---- */
   .quote-bar {
@@ -1162,9 +1166,59 @@
     font-size: 12.5px; color: var(--ink-faint); font-style: italic;
     white-space: pre-wrap;
   }
+  /* ---- 登录 / 注册遮罩 ---- */
+  .login-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(43,33,24,0.55); backdrop-filter: blur(3px);
+  }
+  .login-overlay.active { display: flex; }
+  .login-card {
+    width: 360px; max-width: 92vw; background: var(--parchment);
+    border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); padding: 28px 26px;
+  }
+  .login-card h2 { margin: 0 0 4px; color: var(--accent); font-size: 22px; }
+  .login-card .sub { margin: 0 0 18px; color: var(--ink-faint); font-size: 13px; }
+  .login-card label { display: block; font-size: 12.5px; color: var(--ink-soft); margin: 12px 0 4px; }
+  .login-card input {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px;
+    background: #fff; font-size: 14px; font-family: inherit; color: var(--ink);
+    box-sizing: border-box;
+  }
+  .login-card input:focus { outline: none; border-color: var(--accent-soft); }
+  .login-card .primary {
+    width: 100%; margin-top: 18px; padding: 10px; border: none; border-radius: 7px;
+    background: var(--accent); color: var(--parchment); font-size: 15px; cursor: pointer;
+    font-family: inherit;
+  }
+  .login-card .primary:hover { background: var(--accent-soft); }
+  .login-card .switch { margin-top: 14px; text-align: center; font-size: 13px; color: var(--ink-faint); }
+  .login-card .switch a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .login-card .err { margin-top: 12px; color: var(--accent); font-size: 13px; min-height: 1em; }
+  /* 顶栏用户名 chip + 登出 */
+  .user-chip { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-soft); }
+  .user-chip button {
+    border: 1px solid var(--line); background: transparent; color: var(--ink-faint);
+    border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .user-chip button:hover { color: var(--accent); border-color: var(--accent-soft); }
 </style>
 </head>
 <body>
+<div class="login-overlay" id="login-overlay">
+  <div class="login-card">
+    <h2 id="login-title">登录工房</h2>
+    <p class="sub" id="login-sub">登录后，莉娜只会记得你和她之间的事。</p>
+    <label for="login-username">用户名</label>
+    <input type="text" id="login-username" autocomplete="username" placeholder="你的名字">
+    <label for="login-password">密码</label>
+    <input type="password" id="login-password" autocomplete="current-password" placeholder="至少 4 位">
+    <button class="primary" id="login-submit">登录</button>
+    <div class="err" id="login-err"></div>
+    <div class="switch" id="login-switch">还没有账号？<a id="login-switch-link">注册一个</a></div>
+  </div>
+</div>
 <header class="topbar">
   <div class="brand">
     <span class="seal">莉</span>
@@ -1183,15 +1237,10 @@
     首次<input type="number" id="proactive-interval" min="1" max="60" step="1">分钟·共<input type="number" id="proactive-max-nudges" min="1" max="20" step="1">次后告别
   </span>
   <div class="grow"></div>
-  <div class="auth-card" id="auth-card">
+  <div class="user-chip" id="user-chip">
     <span class="status-dot" id="status-dot" title="未连接"></span>
-    <input type="password" id="api-key" placeholder="Anthropic API Key" autocomplete="off">
-    <select id="model-select">
-      <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-      <option value="claude-opus-4-7">Opus 4.7</option>
-      <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-    </select>
-    <button id="auth-btn">连接</button>
+    <span id="user-name"></span>
+    <button id="logout-btn">登出</button>
   </div>
 </header>
 
@@ -1355,13 +1404,15 @@
 const $ = (id) => document.getElementById(id);
 let state = {
   ready: false,
+  loggedIn: false,
+  username: null,
   currentSession: null,
   sessions: [],
   sending: false,
   // 主动发言 / 续说
   proactiveEnabled: true,
   proactiveIntervalMin: 3,   // 首次主动开口前等多少分钟（驱动退避基准）
-  proactiveMaxNudges: 3,     // 连续 N 次未回应 → 第 N 次改为「告别」并停止
+  proactiveMaxNudges: 4,     // 4 级：最近话题→更早话题→自己经历→告别
   proactiveCount: 0,         // 上一次用户互动以来已主动发言的次数
   lastActivity: Date.now(),
   proactiveBusy: false,
@@ -1452,16 +1503,19 @@ async function api(path, opts = {}) {
 async function refreshStatus() {
   try {
     const s = await api('/api/status');
-    state.ready = s.ready;
-    $('status-dot').classList.toggle('ready', s.ready);
-    $('status-dot').title = s.ready ? `已连接 (${s.model})` : '未连接';
-    if (s.ready) {
-      $('api-key').placeholder = '已连接 (留空保持现状)';
-      $('model-select').value = s.model || s.default_model;
-    }
+    // ready 由登录态决定（见 init / onLoggedIn）；这里不覆盖。状态点反映登录。
+    $('status-dot').classList.toggle('ready', !!s.logged_in);
+    $('status-dot').title = s.logged_in ? '已登录' : '未登录';
     // 主动发言 / 续说节奏参数由后端下发（可被环境变量调），覆盖前端默认。
     if (s.proactive_pacing) {
       state.pacing = Object.assign({}, state.pacing, s.proactive_pacing);
+      // max_nudges 以后端为准（四级 = 4），避免浏览器里残留的旧 localStorage
+      // 值把它压小、导致主动发言提前停（少了 self / 告别两级）。
+      if (typeof s.proactive_pacing.max_nudges === 'number') {
+        state.proactiveMaxNudges = s.proactive_pacing.max_nudges;
+        localStorage.setItem('lina_proactive_max', String(s.proactive_pacing.max_nudges));
+        const el = $('proactive-max-nudges'); if (el) el.value = s.proactive_pacing.max_nudges;
+      }
     }
     // 用户在 UI 设的"首次 N 分钟"优先级最高，覆盖后端默认的 engage_base_ms。
     state.pacing.engage_base_ms = state.proactiveIntervalMin * 60 * 1000;
@@ -1625,7 +1679,16 @@ function renderMessages(messages) {
   }
   let latestMood = null;
   for (const m of messages) {
-    appendMessage(m.role, m.content, { meta: m.meta });
+    // 跳过主动发言/续说的「系统提示」占位 user 消息——它们是注入给模型的
+    // 指令（PROACTIVE_INSTRUCTION 等），不该展示给用户。
+    if (m.role === 'user' && m.meta && m.meta.system_trigger) continue;
+    // 从存储的 meta 还原角标：续说 / 主动 / 告别（刷新或切会话后仍正确）。
+    appendMessage(m.role, m.content, {
+      meta: m.meta,
+      continuation: !!(m.meta && m.meta.continuation),
+      proactive: !!(m.meta && m.meta.proactive),
+      farewell: !!(m.meta && m.meta.farewell),
+    });
     if (m.role === 'assistant' && m.meta) latestMood = m.meta;
   }
   // Until the model actually emits a mood tag, treat the session as still
@@ -1738,7 +1801,9 @@ function appendMessage(role, content, opts = {}) {
   if (empty) empty.remove();
 
   const wrap = document.createElement('div');
-  wrap.className = 'msg ' + role + (opts.proactive ? ' proactive' : '') + (opts.farewell ? ' farewell' : '');
+  wrap.className = 'msg ' + role
+    + (opts.continuation ? ' continuation' : (opts.proactive ? ' proactive' : ''))
+    + (opts.farewell ? ' farewell' : '');
   const chip = (role === 'assistant' && opts.meta) ? moodChipHTML(opts.meta) : '';
   wrap.innerHTML = `
     <div class="avatar">${role === 'user' ? '你' : '莉'}</div>
@@ -1934,25 +1999,82 @@ async function send() {
   }
 }
 
-$('auth-btn').addEventListener('click', async () => {
-  const key = $('api-key').value.trim();
-  const model = $('model-select').value;
-  if (!key) {
-    if (!state.ready) { toast('请输入 API Key。'); return; }
-    // Just switch model with existing key — not supported by /api/auth without key.
-    // Easiest: require key on switch. Otherwise skip.
-    toast('如需切换模型，请重新输入 API Key。');
-    return;
+// ==================== 用户登录 / 注册 ====================
+let loginMode = 'login';  // 'login' | 'register'
+function showLogin() {
+  $('login-overlay').classList.add('active');
+  $('login-err').textContent = '';
+  $('login-username').focus();
+}
+function hideLogin() { $('login-overlay').classList.remove('active'); }
+function setLoginMode(mode) {
+  loginMode = mode;
+  if (mode === 'register') {
+    $('login-title').textContent = '注册新账号';
+    $('login-sub').textContent = '注册后即自动登录，记忆只属于你。';
+    $('login-submit').textContent = '注册';
+    $('login-switch').innerHTML = '已有账号？<a id="login-switch-link">去登录</a>';
+    $('login-password').setAttribute('autocomplete', 'new-password');
+  } else {
+    $('login-title').textContent = '登录工房';
+    $('login-sub').textContent = '登录后，莉娜只会记得你和她之间的事。';
+    $('login-submit').textContent = '登录';
+    $('login-switch').innerHTML = '还没有账号？<a id="login-switch-link">注册一个</a>';
+    $('login-password').setAttribute('autocomplete', 'current-password');
   }
+  $('login-switch-link').addEventListener('click', () =>
+    setLoginMode(loginMode === 'login' ? 'register' : 'login'));
+  $('login-err').textContent = '';
+}
+async function submitLogin() {
+  const username = $('login-username').value.trim();
+  const password = $('login-password').value;
+  if (!username || !password) { $('login-err').textContent = '请填写用户名和密码。'; return; }
+  const path = loginMode === 'register' ? '/api/register' : '/api/login';
   try {
-    await api('/api/auth', { method: 'POST', body: JSON.stringify({ api_key: key, model }) });
-    toast('已连接。');
-    $('api-key').value = '';
-    await refreshStatus();
+    const data = await api(path, { method: 'POST', body: JSON.stringify({ username, password }) });
+    state.loggedIn = true;
+    state.username = data.username;
+    state.ready = true;
+    $('login-password').value = '';
+    hideLogin();
+    await onLoggedIn();
   } catch (e) {
-    toast('连接失败：' + e.message);
+    $('login-err').textContent = e.message;
   }
-});
+}
+function renderUserChip() {
+  if (state.loggedIn) {
+    $('user-name').textContent = state.username || '';
+    $('user-chip').style.display = '';
+    $('status-dot').classList.add('ready');
+    $('status-dot').title = '已登录';
+  } else {
+    $('user-chip').style.display = 'none';
+  }
+}
+async function doLogout() {
+  try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
+  state.loggedIn = false; state.username = null; state.ready = false;
+  state.currentSession = null; state.sessions = [];
+  renderUserChip(); renderSessions();
+  $('messages').innerHTML = '';
+  setLoginMode('login'); showLogin();
+}
+async function onLoggedIn() {
+  renderUserChip();
+  await loadVersions();
+  await loadSessions();
+  if (state.sessions.length > 0) {
+    await selectSession(state.sessions[0].session_id);
+  } else {
+    await newSession();
+  }
+}
+$('login-submit').addEventListener('click', submitLogin);
+['login-username','login-password'].forEach(id =>
+  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitLogin(); } }));
+$('logout-btn').addEventListener('click', doLogout);
 
 $('new-session').addEventListener('click', newSession);
 $('send-btn').addEventListener('click', send);
@@ -2970,7 +3092,7 @@ function loadProactivePref() {
   state.proactiveEnabled = v !== 'off';   // 默认开启
   $('proactive-checkbox').checked = state.proactiveEnabled;
   state.proactiveIntervalMin = clampInt(localStorage.getItem('lina_proactive_interval'), 1, 60, 3);
-  state.proactiveMaxNudges = clampInt(localStorage.getItem('lina_proactive_max'), 1, 20, 3);
+  state.proactiveMaxNudges = clampInt(localStorage.getItem('lina_proactive_max'), 1, 20, 4);
   $('proactive-interval').value = state.proactiveIntervalMin;
   $('proactive-max-nudges').value = state.proactiveMaxNudges;
   // "首次 N 分钟"直接驱动退避基准 engage_base_ms。
@@ -3025,7 +3147,7 @@ async function runContinue() {
       body: JSON.stringify({ session_id: state.currentSession }),
     });
     if (data && data.ok && data.reply) {
-      const wrap = appendMessage('assistant', data.reply, { meta: data.mood, proactive: true });
+      const wrap = appendMessage('assistant', data.reply, { meta: data.mood, continuation: true });
       setBubbleMood(wrap, data.mood);
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
@@ -3054,9 +3176,14 @@ async function runProactive() {
       method: 'POST',
       body: JSON.stringify({ session_id: state.currentSession, mode }),
     });
-    if (data && data.ok && data.reply) {
+    if (data && data.skipped) {
+      // 后端权威判定：已经告别过 → 停止后续主动（拉满计数，guard 会拦住）。
+      if (data.reason === 'already_farewelled') state.proactiveCount = state.proactiveMaxNudges;
+    } else if (data && data.ok && data.reply) {
+      // 是否告别以后端返回为准（后端按权威计数决定，可能覆盖前端 mode）。
+      const didFarewell = !!data.farewell;
       const wrap = appendMessage('assistant', data.reply, {
-        meta: data.mood, proactive: true, farewell: !!data.farewell,
+        meta: data.mood, proactive: true, farewell: didFarewell,
       });
       setBubbleMood(wrap, data.mood);
       renderStateBar(data.mood);
@@ -3064,7 +3191,8 @@ async function runProactive() {
       if (data.usage) renderUsage(data.usage);
       await loadSessions();
       scrollToBottom();
-      state.proactiveCount = nextCount;   // 推进退避档位
+      // 告别了就把计数拉满 → 之后 maybeProactive 不再发起；否则推进一档。
+      state.proactiveCount = didFarewell ? state.proactiveMaxNudges : nextCount;
     }
   } catch (e) {
     // 静默失败
@@ -3078,29 +3206,30 @@ $('proactive-checkbox').addEventListener('change', (e) => setProactivePref(e.tar
 $('proactive-interval').addEventListener('change', (e) => setProactiveInterval(e.target.value));
 $('proactive-max-nudges').addEventListener('change', (e) => setProactiveMaxNudges(e.target.value));
 $('quote-bar-clear').addEventListener('click', clearQuote);
-// 任何输入/聚焦都算"还在场"，刷新闲置计时
+// 只有「真的在打字」才算用户还在场、刷新闲置计时（发消息在 send() 里另算）。
+// 故意不监听 focus / 窗口 focus —— 点一下输入框、切回来看一眼，都不该
+// 打断主动发言节奏，否则永远观察不到完整的四级主动发言 + 告别。
 $('input').addEventListener('input', resetIdle);
-$('input').addEventListener('focus', resetIdle);
-window.addEventListener('focus', resetIdle);
 
 (async function init() {
   loadProactivePref();
-  await refreshStatus();
-  await loadVersions();   // populate the per-session dropdown
-  await loadSessions();
-  // The session list is now scoped to this browser (X-Client-Id). A returning
-  // visitor resumes their own latest session; a brand-new visitor has none, so
-  // we start a fresh one for them — never landing in another tester's chat.
-  if (state.sessions.length > 0) {
-    await selectSession(state.sessions[0].session_id);
+  await refreshStatus();   // 拉 controller / pacing 配置（公开端点，无需登录）
+  // 强制登录：先查登录态。已登录直接进；未登录弹登录框，聊天功能全部锁住。
+  let who = null;
+  try { who = await api('/api/whoami'); } catch (e) {}
+  if (who && who.logged_in) {
+    state.loggedIn = true;
+    state.username = who.username;
+    state.ready = true;
+    await onLoggedIn();
   } else {
-    await newSession();
+    setLoginMode('login');
+    showLogin();
   }
-  // Models pre-load at server startup; reflect that here and keep polling
-  // until they're ready so the status pill flips to 就绪 on its own.
+  // 语音模型状态轮询（与登录无关，先跑着）。
   const vst = await voiceRefreshStatus();
   if (vst === 'loading') pollVoiceUntilReady();
-  // 闲置轮询：每 2s 检查一次是否该续说 / 主动发言。
+  // 闲置轮询：每 2s 检查一次是否该续说 / 主动发言（未登录时各 guard 会拦住）。
   setInterval(maybeProactive, PROACTIVE_POLL_MS);
 })();
 </script>
