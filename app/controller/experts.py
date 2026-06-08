@@ -414,6 +414,23 @@ def build_lina_advisors(
             maximum=300,
             timeout=timeout,
         ),
+        "allow_segment": BoolAdvisor(
+            client,
+            model=model,
+            name="allow_segment",
+            field_name="allow_segment",
+            target_desc=(
+                "本轮是否**允许把回复拆成多小段**（第一段先发，其余在用户沉默时逐段补完，"
+                "像发微信连发）。这是给主模型的「切分许可」，主模型在许可下自己决定实际切几段。"
+            ),
+            decision_rules=(
+                "- 本轮内容**会有多个独立的意思 / 会展开讲**（讲经历、列举、抛带后续的钩子）→ true。\n"
+                "- 用户问开放/需要详述的问题（讲讲你…、慢慢说、详细说说）→ true。\n"
+                "- 只是一两口气说完的短回复（问候、短反应、简单接话、能力边界拒绝、告别）→ false。\n"
+                "- 安抚低落情绪时倾向 false（一段一段补会显得不专注）。"
+            ),
+            timeout=timeout,
+        ),
         # --- modules ---
         "module_user_vent": BoolAdvisor(
             client,

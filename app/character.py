@@ -796,6 +796,12 @@ class CharacterEngine:
         # Strip leading mood tag, then trailing segment-plan tag.
         cleaned_reply, mood = parse_mood_tag(raw_reply)
         cleaned_reply, segments = parse_segments_tag(cleaned_reply)
+        # 尊重 controller 的切分预算：本轮不准拆 → 丢弃模型可能误带的段；
+        # 准拆 → 按 plan.max_segments 截断。（parse 已先剥掉标记，不会外露。）
+        if self._controller is not None and not plan.allow_segment:
+            segments = []
+        else:
+            segments = segments[: max(0, plan.max_segments - 1)]  # 第一段已发，余下 max-1 段
         # A fresh user turn invalidates any earlier split plan, installs this one.
         conversation.pending_segments = segments or None
 

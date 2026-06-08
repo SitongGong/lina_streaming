@@ -352,6 +352,8 @@ class LinaController:
             allow_doubt_wrap=merged.get("allow_doubt_wrap", True),
             sentences=merged.get("sentences", 2),
             max_reply_chars=merged.get("max_reply_chars", 45),
+            allow_segment=merged.get("allow_segment", False),
+            max_segments=merged.get("max_segments", 3),
             tone_hint=merged.get("tone_hint", ""),
             enforce_mood_continuity=merged.get("enforce_mood_continuity", True),
             trace_source="llm",
