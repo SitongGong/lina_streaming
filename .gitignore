@@ -5,6 +5,8 @@ venv/
 .env
 conversations/*.json
 !conversations/.gitkeep
+feedback/*.json
+!feedback/.gitkeep
 .DS_Store
 .claude/settings.local.json
 prompt_overrides/

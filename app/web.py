@@ -27,6 +27,7 @@ from .auth import UserStore
 from .character import CharacterEngine, DEFAULT_MODEL
 from .config import (
     CONVERSATIONS_DIR,
+    FEEDBACK_DIR,
     PROJECT_ROOT,
     STATIC_DIR,
     USERS_FILE,
@@ -37,6 +38,7 @@ from .config import (
 )
 from .controller import LinaController, build_default_controller
 from .conversation import ConversationStore
+from .feedback import DIMENSIONS, FeedbackStore
 from .rag import retrieve_user_memory_chunks
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
@@ -55,6 +57,7 @@ _client_creds: dict[str, dict] = {}   # identity(user_id) -> {"key": str, "model
 _ANON_CLIENT = "_anon_"               # bucket for header-less (curl/admin) calls
 _engine_lock = threading.Lock()
 _store = ConversationStore(CONVERSATIONS_DIR)
+_feedback_store = FeedbackStore(FEEDBACK_DIR)
 
 # ---- 强制账号登录 ----
 # 必须登录才能聊。登录态存 Flask 签名 cookie（session["user_id"]）。
@@ -1189,6 +1192,64 @@ def create_app() -> Flask:
                 "Connection": "keep-alive",
             },
         )
+
+    # ---------- Post-evaluation questionnaire ----------
+    # A tester rates Lina on nine dimensions (good/bad + reason) plus a
+    # free-text note, one questionnaire per session. Stored as JSON (one file
+    # per session) under feedback/. No Anthropic call, so these are NOT gated
+    # on _client_ready — the chat being evaluated already happened.
+
+    @app.route("/api/feedback/schema", methods=["GET"])
+    def feedback_schema():
+        return jsonify(
+            {"dimensions": [{"key": k, "label": label} for k, label in DIMENSIONS]}
+        )
+
+    @app.route("/api/feedback/summary", methods=["GET"])
+    def feedback_summary():
+        # Aggregate ALL testers' questionnaires — this is the developer-facing
+        # overview for improving Lina, so it is intentionally not scoped to the
+        # requesting browser (unlike the per-client session sidebar).
+        return jsonify(_feedback_store.summary(None))
+
+    @app.route("/api/feedback/export", methods=["GET"])
+    def feedback_export():
+        records = [r.to_dict() for r in _feedback_store.list_records(None)]
+        payload = json.dumps(records, ensure_ascii=False, indent=2)
+        return Response(
+            payload,
+            mimetype="application/json; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="feedback.json"'},
+        )
+
+    @app.route("/api/feedback", methods=["POST"])
+    def feedback_submit():
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+        # Copy the conversation's title in for human-readable indexing — but
+        # only if that session actually exists; never auto-create one here
+        # (ConversationStore.load() would otherwise spawn an empty session).
+        session_title = ""
+        if _store._path(session_id).exists():
+            session_title = _store.load(session_id).title
+        try:
+            record = _feedback_store.submit(
+                session_id=session_id,
+                dimensions=data.get("dimensions"),
+                other=data.get("other"),
+                client_id=_client_id(),
+                session_title=session_title,
+            )
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "feedback": record.to_dict()})
+
+    @app.route("/api/feedback/<session_id>", methods=["GET"])
+    def feedback_get(session_id: str):
+        record = _feedback_store.load(session_id)
+        return jsonify({"feedback": record.to_dict() if record else None})
 
     # ---------- Prompt override endpoints ----------
 

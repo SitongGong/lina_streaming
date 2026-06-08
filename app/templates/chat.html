@@ -47,6 +47,11 @@
     flex-direction: column;
     overflow-y: auto;
   }
+  .view.active.view-feedback {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
 
   /* Tabs in the topbar */
   .tabs {
@@ -1203,6 +1208,146 @@
     border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; font-family: inherit;
   }
   .user-chip button:hover { color: var(--accent); border-color: var(--accent-soft); }
+
+  /* ---- Evaluation questionnaire ---- */
+  .chat-header .actions button.eval {
+    background: var(--accent); color: var(--parchment); border-color: var(--accent);
+  }
+  .chat-header .actions button.eval:hover { background: var(--ink); border-color: var(--ink); color: var(--parchment); }
+
+  .modal-foot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px;
+    border-top: 1px solid var(--line);
+    background: linear-gradient(0deg, rgba(255,255,255,0.4), rgba(255,255,255,0));
+  }
+  .modal-foot .hint { font-size: 12px; color: var(--accent); }
+  .modal-foot button {
+    border: 1px solid var(--line);
+    background: var(--parchment);
+    color: var(--ink-soft);
+    border-radius: 4px;
+    padding: 7px 16px;
+    font-family: "Noto Serif SC", serif; font-size: 13px;
+    cursor: pointer;
+  }
+  .modal-foot button:hover { border-color: var(--accent); color: var(--accent); }
+  .modal-foot button.apply {
+    background: var(--accent); color: var(--parchment); border-color: var(--accent);
+  }
+  .modal-foot button.apply:hover { background: var(--ink); border-color: var(--ink); color: var(--parchment); }
+
+  /* Questionnaire form (inside modal) */
+  .fb-row {
+    display: grid;
+    grid-template-columns: 180px auto 1fr;
+    align-items: start;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+  }
+  .fb-row .fb-label {
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+    font-size: 15px; color: var(--ink);
+    padding-top: 5px;
+  }
+  .fb-row .fb-label .fb-key {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; color: var(--ink-faint);
+    margin-right: 6px;
+  }
+  .fb-toggle { display: inline-flex; gap: 6px; padding-top: 2px; }
+  .toggle-btn {
+    border: 1px solid var(--line);
+    background: var(--parchment);
+    color: var(--ink-soft);
+    border-radius: 4px;
+    padding: 5px 14px;
+    font-family: "Noto Serif SC", serif; font-size: 13px;
+    cursor: pointer; white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  .toggle-btn:hover { border-color: var(--accent-soft); }
+  .toggle-btn.active.good {
+    background: #2d6a3d; color: var(--parchment); border-color: #2d6a3d;
+  }
+  .toggle-btn.active.bad {
+    background: var(--accent); color: var(--parchment); border-color: var(--accent);
+  }
+  .fb-reason {
+    width: 100%;
+    min-height: 38px; max-height: 160px;
+    font-family: "Noto Serif SC", serif; font-size: 13px;
+    line-height: 1.5; color: var(--ink);
+    background: rgba(255,253,247,0.95);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 7px 10px; resize: vertical; outline: none;
+    transition: border-color 0.12s;
+  }
+  .fb-reason:focus { border-color: var(--accent-soft); }
+  .fb-reason.required-missing { border-color: #b53b3b; background: rgba(180,60,60,0.06); }
+  .fb-reason::placeholder { color: var(--ink-faint); }
+  .fb-other-block { padding-top: 16px; }
+  .fb-other-block .fb-label {
+    display: block; margin-bottom: 8px;
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif; font-size: 15px;
+  }
+
+  /* Questionnaire summary view (all testers) */
+  .feedback-page {
+    max-width: 1100px; margin: 0 auto; padding: 20px 28px 40px; width: 100%;
+  }
+  .fb-sum-row {
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    margin-bottom: 14px;
+    background: rgba(255,253,247,0.55);
+    overflow: hidden;
+  }
+  .fb-sum-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px;
+    background: rgba(176,132,56,0.08);
+    border-bottom: 1px solid var(--line);
+  }
+  .fb-sum-head .h-label {
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif; font-size: 15px; font-weight: 500;
+  }
+  .fb-sum-head .h-key { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--ink-faint); }
+  .fb-sum-head .h-counts { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 12px; }
+  .fb-sum-head .h-counts .good { color: #2d6a3d; }
+  .fb-sum-head .h-counts .bad { color: var(--accent); }
+  .fb-bar {
+    display: flex; height: 8px; background: rgba(0,0,0,0.06);
+  }
+  .fb-bar .seg-good { background: #2d6a3d; }
+  .fb-bar .seg-bad { background: var(--accent); }
+  .fb-sum-reasons { padding: 6px 14px 12px; }
+  .fb-sum-reasons .reason-item {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 12.5px; line-height: 1.5; padding: 4px 0;
+    border-top: 1px solid rgba(0,0,0,0.04);
+  }
+  .fb-sum-reasons .reason-item:first-child { border-top: none; }
+  .fb-sum-reasons .tag { font-family: "JetBrains Mono", monospace; font-size: 10.5px; flex-shrink: 0; }
+  .fb-sum-reasons .tag.good { color: #2d6a3d; }
+  .fb-sum-reasons .tag.bad { color: var(--accent); }
+  .fb-sum-reasons .reason-text { color: var(--ink-soft); }
+  .fb-sum-reasons .reason-src { color: var(--ink-faint); font-family: "JetBrains Mono", monospace; font-size: 10px; margin-left: auto; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-sum-empty { padding: 8px 14px 12px; font-size: 12px; color: var(--ink-faint); font-style: italic; }
+  .fb-others-block { margin-top: 22px; }
+  .fb-others-block h4 {
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif; font-size: 16px; font-weight: 500;
+    margin: 0 0 10px; color: var(--ink);
+  }
+  .fb-other-item {
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 10px 14px; margin-bottom: 8px;
+    background: rgba(255,253,247,0.55);
+    font-size: 13px; line-height: 1.55; color: var(--ink-soft);
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .fb-other-item .reason-src { display: block; margin-top: 6px; color: var(--ink-faint); font-family: "JetBrains Mono", monospace; font-size: 10px; }
 </style>
 </head>
 <body>
@@ -1240,6 +1385,7 @@
   <nav class="tabs" id="tabs">
     <button class="tab active" data-view="chat">对话</button>
     <button class="tab" data-view="prompts">提示词</button>
+    <button class="tab" data-view="feedback">汇总</button>
   </nav>
   <label class="proactive-toggle" id="proactive-toggle" title="闲置后莉娜会主动开口；多次仍无回应则告别。关闭后该功能完全不激活。">
     <input type="checkbox" id="proactive-checkbox">
@@ -1277,6 +1423,7 @@
       <div class="actions">
         <button id="export-btn" title="下载当前会话 JSON">下载</button>
         <button id="reset-btn" title="清空当前会话历史">清空历史</button>
+        <button id="evaluation-btn" class="eval" title="填写本会话的评测问卷">问卷</button>
       </div>
     </div>
 
@@ -1380,6 +1527,49 @@
   </div>
 </div>
 
+<div class="view view-feedback" id="view-feedback">
+  <div class="feedback-page">
+    <div class="prompts-banner">
+      <span class="seal">★</span>
+      <div class="text">
+        <strong>评测问卷汇总（所有测评者）。</strong>
+        每位测评者对话后点聊天区的「问卷」按钮填写的问卷都会汇总到这里（保存在 <code>feedback/</code> 下，已加入 .gitignore），
+        按九个维度统计好 / 不好比例并列出原因，用于改进莉娜。
+      </div>
+    </div>
+
+    <div class="prompts-toolbar">
+      <div class="status" id="feedback-summary-status">尚无问卷</div>
+      <button id="feedback-download" class="primary">下载全部问卷</button>
+      <button id="feedback-refresh">刷新</button>
+    </div>
+
+    <div id="feedback-summary"></div>
+  </div>
+</div>
+
+<div class="modal" id="feedback-modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">评测问卷</div>
+      <div class="versus" id="feedback-modal-name"></div>
+      <button class="modal-close" id="feedback-modal-close" title="关闭">×</button>
+    </div>
+    <div class="prompts-toolbar" style="border-radius:0;border-left:none;border-right:none;border-top:none;margin:0;">
+      <div class="status" id="feedback-modal-status">对每个维度选择「好 / 不好」，选「不好」时请填写原因。</div>
+    </div>
+    <div class="modal-body">
+      <div id="feedback-form"></div>
+    </div>
+    <div class="modal-foot">
+      <span class="hint" id="feedback-form-hint"></span>
+      <span class="grow"></span>
+      <button id="feedback-cancel">取消</button>
+      <button id="feedback-submit" class="apply">提交问卷</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="session-prompt-modal">
   <div class="modal-card">
     <div class="modal-head">
@@ -1442,6 +1632,8 @@ let state = {
     engage_jitter: 0.3,
     max_nudges: 3,
   },
+  feedbackDims: null,   // cached [{key,label}] from /api/feedback/schema
+  feedbackDraft: {},    // {dimKey: {rating, reason}} while editing the questionnaire
 };
 
 // ---- 节奏 / 闲置轮询 helper ----
@@ -2181,10 +2373,202 @@ function switchView(view) {
     if (!state.promptsLoaded) loadPrompts();
     loadVersions();  // always refresh — cheap, picks up external changes
   }
+  if (view === 'feedback') {
+    loadFeedbackSummary();  // always refresh — picks up new submissions
+  }
 }
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => switchView(t.dataset.view));
 });
+
+// ===================== Evaluation questionnaire =====================
+
+async function ensureFeedbackSchema() {
+  if (state.feedbackDims) return state.feedbackDims;
+  const data = await api('/api/feedback/schema');
+  state.feedbackDims = data.dimensions || [];
+  return state.feedbackDims;
+}
+
+async function openFeedbackModal() {
+  if (!state.currentSession) { toast('请先选择会话。'); return; }
+  let dims;
+  try {
+    dims = await ensureFeedbackSchema();
+  } catch (e) {
+    toast('加载问卷失败：' + e.message, 3500);
+    return;
+  }
+  // Prefill with any existing submission for this session.
+  let existing = null;
+  try {
+    const got = await api('/api/feedback/' + encodeURIComponent(state.currentSession));
+    existing = got.feedback;
+  } catch (e) { /* no prior submission is fine */ }
+
+  state.feedbackDraft = {};
+  dims.forEach(d => {
+    const prev = existing && existing.dimensions ? existing.dimensions[d.key] : null;
+    state.feedbackDraft[d.key] = {
+      rating: prev && (prev.rating === 'good' || prev.rating === 'bad') ? prev.rating : null,
+      reason: prev && prev.reason ? prev.reason : '',
+    };
+  });
+  state.feedbackDraft.__other = existing && existing.other ? existing.other : '';
+
+  $('feedback-modal-name').textContent = '(' + state.currentSession + ')';
+  $('feedback-form-hint').textContent = '';
+  renderFeedbackForm();
+  $('feedback-modal').classList.add('active');
+}
+
+function closeFeedbackModal() {
+  $('feedback-modal').classList.remove('active');
+}
+
+function renderFeedbackForm() {
+  const dims = state.feedbackDims || [];
+  const draft = state.feedbackDraft;
+  const rows = dims.map(d => {
+    const cur = draft[d.key] || { rating: null, reason: '' };
+    const isBad = cur.rating === 'bad';
+    return `
+      <div class="fb-row" data-key="${d.key}">
+        <div class="fb-label"><span class="fb-key">${d.key}</span>${escapeHtml(d.label)}</div>
+        <div class="fb-toggle">
+          <button type="button" class="toggle-btn good${cur.rating === 'good' ? ' active' : ''}" data-rating="good">👍 好</button>
+          <button type="button" class="toggle-btn bad${cur.rating === 'bad' ? ' active' : ''}" data-rating="bad">👎 不好</button>
+        </div>
+        <textarea class="fb-reason" data-key="${d.key}"
+          placeholder="${isBad ? '请说明哪里不好（必填）' : '原因（可选）'}">${escapeHtml(cur.reason || '')}</textarea>
+      </div>`;
+  }).join('');
+
+  const other = (draft.__other || '');
+  $('feedback-form').innerHTML = rows + `
+    <div class="fb-other-block">
+      <span class="fb-label">其他问题反馈</span>
+      <textarea class="fb-reason" id="fb-other" placeholder="任何其他想反馈的问题或建议（可选）">${escapeHtml(other)}</textarea>
+    </div>`;
+
+  // Toggle button clicks
+  $('feedback-form').querySelectorAll('.fb-toggle .toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = btn.closest('.fb-row');
+      const key = row.dataset.key;
+      const rating = btn.dataset.rating;
+      state.feedbackDraft[key].rating = rating;
+      row.querySelectorAll('.toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
+      const ta = row.querySelector('.fb-reason');
+      ta.placeholder = rating === 'bad' ? '请说明哪里不好（必填）' : '原因（可选）';
+      if (rating !== 'bad') ta.classList.remove('required-missing');
+    });
+  });
+  // Reason textareas
+  $('feedback-form').querySelectorAll('.fb-reason[data-key]').forEach(ta => {
+    ta.addEventListener('input', () => {
+      state.feedbackDraft[ta.dataset.key].reason = ta.value;
+      if (ta.value.trim()) ta.classList.remove('required-missing');
+    });
+  });
+  const otherTa = $('fb-other');
+  if (otherTa) otherTa.addEventListener('input', () => { state.feedbackDraft.__other = otherTa.value; });
+}
+
+async function submitFeedback() {
+  const dims = state.feedbackDims || [];
+  const draft = state.feedbackDraft;
+  // Validate: every dimension rated; "bad" needs a reason.
+  for (const d of dims) {
+    const cur = draft[d.key] || {};
+    if (cur.rating !== 'good' && cur.rating !== 'bad') {
+      $('feedback-form-hint').textContent = `维度「${d.label}」还没选择好 / 不好。`;
+      toast(`「${d.label}」还没评价。`, 3000);
+      return;
+    }
+    if (cur.rating === 'bad' && !(cur.reason || '').trim()) {
+      $('feedback-form-hint').textContent = `维度「${d.label}」评为「不好」时必须填写原因。`;
+      const ta = $('feedback-form').querySelector(`.fb-reason[data-key="${d.key}"]`);
+      if (ta) { ta.classList.add('required-missing'); ta.focus(); }
+      toast(`「${d.label}」请填写原因。`, 3000);
+      return;
+    }
+  }
+  const dimensions = {};
+  dims.forEach(d => {
+    const cur = draft[d.key];
+    dimensions[d.key] = { rating: cur.rating, reason: (cur.reason || '').trim() };
+  });
+  try {
+    await api('/api/feedback', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: state.currentSession,
+        dimensions,
+        other: (draft.__other || '').trim(),
+      }),
+    });
+  } catch (e) {
+    toast('提交失败：' + e.message, 3500);
+    return;
+  }
+  toast('问卷已提交，谢谢！');
+  closeFeedbackModal();
+}
+
+async function loadFeedbackSummary() {
+  let data;
+  try {
+    data = await api('/api/feedback/summary');
+  } catch (e) {
+    $('feedback-summary').innerHTML = '<div class="fb-sum-empty">加载失败：' + escapeHtml(e.message) + '</div>';
+    return;
+  }
+  renderFeedbackSummary(data);
+}
+
+function renderFeedbackSummary(data) {
+  const n = data.submission_count || 0;
+  $('feedback-summary-status').innerHTML = `共 <strong>${n}</strong> 份问卷（所有测评者）`;
+  if (!n) {
+    $('feedback-summary').innerHTML = '<div class="fb-sum-empty">还没有收到任何问卷。完成一段对话后点聊天区的「问卷」按钮填写。</div>';
+    return;
+  }
+  // Label a reason/other by its session — title if present, else id.
+  const srcLabel = (o) => (o.session_title && o.session_title.trim()) ? o.session_title.trim() : o.session_id;
+  const dimsHtml = (data.dimensions || []).map(d => {
+    const total = d.total || 0;
+    const goodPct = total ? (d.good / total * 100) : 0;
+    const badPct = total ? (d.bad / total * 100) : 0;
+    const reasons = (d.reasons || []).map(r => `
+      <div class="reason-item">
+        <span class="tag ${r.rating}">${r.rating === 'good' ? '好' : '不好'}</span>
+        <span class="reason-text">${escapeHtml(r.reason)}</span>
+        <span class="reason-src" title="${escapeHtml(r.session_id)}">${escapeHtml(srcLabel(r))}</span>
+      </div>`).join('');
+    return `
+      <div class="fb-sum-row">
+        <div class="fb-sum-head">
+          <span class="h-key">${d.key}</span>
+          <span class="h-label">${escapeHtml(d.label)}</span>
+          <span class="h-counts"><span class="good">好 ${d.good}</span> · <span class="bad">不好 ${d.bad}</span></span>
+        </div>
+        <div class="fb-bar">
+          <div class="seg-good" style="width:${goodPct}%"></div>
+          <div class="seg-bad" style="width:${badPct}%"></div>
+        </div>
+        ${reasons ? `<div class="fb-sum-reasons">${reasons}</div>`
+                  : '<div class="fb-sum-empty">暂无文字原因。</div>'}
+      </div>`;
+  }).join('');
+
+  const others = (data.others || []).map(o => `
+    <div class="fb-other-item">${escapeHtml(o.other)}<span class="reason-src" title="${escapeHtml(o.session_id)}">来自：${escapeHtml(srcLabel(o))}</span></div>`).join('');
+  const othersHtml = others
+    ? `<div class="fb-others-block"><h4>其他问题反馈</h4>${others}</div>` : '';
+
+  $('feedback-summary').innerHTML = dimsHtml + othersHtml;
+}
 
 // ---------- Prompts editor ----------
 state.promptsLoaded = false;
@@ -2771,6 +3155,28 @@ $('session-prompts-reset-all').addEventListener('click', async () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && $('session-prompt-modal').classList.contains('active')) {
     closeSessionPromptModal();
+  }
+});
+
+// ---- Evaluation questionnaire bindings ----
+$('evaluation-btn').addEventListener('click', openFeedbackModal);
+$('feedback-modal-close').addEventListener('click', closeFeedbackModal);
+$('feedback-cancel').addEventListener('click', closeFeedbackModal);
+$('feedback-submit').addEventListener('click', submitFeedback);
+$('feedback-modal').addEventListener('click', (e) => {
+  if (e.target === $('feedback-modal')) closeFeedbackModal();
+});
+$('feedback-refresh').addEventListener('click', loadFeedbackSummary);
+$('feedback-download').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = '/api/feedback/export';  // all testers
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('feedback-modal').classList.contains('active')) {
+    closeFeedbackModal();
   }
 });
 

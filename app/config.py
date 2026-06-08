@@ -9,6 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 CONVERSATIONS_DIR = PROJECT_ROOT / "conversations"
+FEEDBACK_DIR = PROJECT_ROOT / "feedback"
 
 # ---- 可选账号登录（融合：登录用户走账号身份 + 独立目录；匿名用户走 client_id）----
 USERS_DIR = PROJECT_ROOT / "users"
