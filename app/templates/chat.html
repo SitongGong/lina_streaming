@@ -1219,6 +1219,18 @@
     <div class="switch" id="login-switch">还没有账号？<a id="login-switch-link">注册一个</a></div>
   </div>
 </div>
+
+<div class="login-overlay" id="key-overlay">
+  <div class="login-card">
+    <h2>连接 API</h2>
+    <p class="sub">输入你的 Anthropic API Key 才能开始和莉娜对话。</p>
+    <label for="key-input">Anthropic API Key</label>
+    <input type="password" id="key-input" autocomplete="off" placeholder="sk-ant-...">
+    <button class="primary" id="key-submit">连接</button>
+    <div class="err" id="key-err"></div>
+    <div class="switch"><a id="key-logout-link">换个账号登录</a></div>
+  </div>
+</div>
 <header class="topbar">
   <div class="brand">
     <span class="seal">莉</span>
@@ -1503,9 +1515,11 @@ async function api(path, opts = {}) {
 async function refreshStatus() {
   try {
     const s = await api('/api/status');
-    // ready 由登录态决定（见 init / onLoggedIn）；这里不覆盖。状态点反映登录。
-    $('status-dot').classList.toggle('ready', !!s.logged_in);
-    $('status-dot').title = s.logged_in ? '已登录' : '未登录';
+    // ready = 已登录且已连接 API Key。状态点反映「已连接」。
+    state.loggedIn = !!s.logged_in;
+    state.ready = !!s.ready;
+    $('status-dot').classList.toggle('ready', !!s.ready);
+    $('status-dot').title = s.ready ? '已连接' : (s.logged_in ? '已登录·待连接 Key' : '未登录');
     // 主动发言 / 续说节奏参数由后端下发（可被环境变量调），覆盖前端默认。
     if (s.proactive_pacing) {
       state.pacing = Object.assign({}, state.pacing, s.proactive_pacing);
@@ -2035,20 +2049,48 @@ async function submitLogin() {
     const data = await api(path, { method: 'POST', body: JSON.stringify({ username, password }) });
     state.loggedIn = true;
     state.username = data.username;
-    state.ready = true;
+    state.ready = false;          // 登录成功，但还需连接 API Key
     $('login-password').value = '';
     hideLogin();
-    await onLoggedIn();
+    renderUserChip();
+    showKeyPrompt();
   } catch (e) {
     $('login-err').textContent = e.message;
+  }
+}
+
+// ---- 连接 API Key（登录后这一步必做：自带 key，或输入「0」用服务端 key）----
+function showKeyPrompt() {
+  $('key-overlay').classList.add('active');
+  $('key-err').textContent = '';
+  setTimeout(() => $('key-input').focus(), 0);
+}
+function hideKeyPrompt() { $('key-overlay').classList.remove('active'); }
+async function submitKey() {
+  const key = $('key-input').value.trim();
+  if (!key) { $('key-err').textContent = '请输入 API Key。'; return; }
+  $('key-submit').disabled = true;
+  $('key-err').textContent = '验证中…';
+  try {
+    await api('/api/auth', { method: 'POST', body: JSON.stringify({ api_key: key }) });
+    state.ready = true;
+    $('key-input').value = '';
+    $('key-err').textContent = '';
+    hideKeyPrompt();
+    renderUserChip();
+    await onLoggedIn();
+  } catch (e) {
+    $('key-err').textContent = e.message;
+  } finally {
+    $('key-submit').disabled = false;
   }
 }
 function renderUserChip() {
   if (state.loggedIn) {
     $('user-name').textContent = state.username || '';
     $('user-chip').style.display = '';
-    $('status-dot').classList.add('ready');
-    $('status-dot').title = '已登录';
+    $('status-dot').classList.toggle('ready', !!state.ready);
+    $('status-dot').title = state.ready ? '已连接' : '已登录·待连接 Key';
   } else {
     $('user-chip').style.display = 'none';
   }
@@ -2057,6 +2099,7 @@ async function doLogout() {
   try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
   state.loggedIn = false; state.username = null; state.ready = false;
   state.currentSession = null; state.sessions = [];
+  hideKeyPrompt();
   renderUserChip(); renderSessions();
   $('messages').innerHTML = '';
   setLoginMode('login'); showLogin();
@@ -2075,6 +2118,9 @@ $('login-submit').addEventListener('click', submitLogin);
 ['login-username','login-password'].forEach(id =>
   $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitLogin(); } }));
 $('logout-btn').addEventListener('click', doLogout);
+$('key-submit').addEventListener('click', submitKey);
+$('key-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitKey(); } });
+$('key-logout-link').addEventListener('click', doLogout);
 
 $('new-session').addEventListener('click', newSession);
 $('send-btn').addEventListener('click', send);
@@ -3220,8 +3266,13 @@ $('input').addEventListener('input', resetIdle);
   if (who && who.logged_in) {
     state.loggedIn = true;
     state.username = who.username;
-    state.ready = true;
-    await onLoggedIn();
+    // refreshStatus() already set state.ready from /api/status (key connected?).
+    renderUserChip();
+    if (state.ready) {
+      await onLoggedIn();
+    } else {
+      showKeyPrompt();   // 已登录但还没连接 Key（如服务重启后凭证失效）
+    }
   } else {
     setLoginMode('login');
     showLogin();

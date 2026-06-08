@@ -453,16 +453,6 @@ def _invalidate_session_engine(session_id: str) -> None:
     _pop_engines_with_suffix("\x00sess:" + session_id)
 
 
-def _register_server_creds(user_id: str) -> bool:
-    """登录后给该 user_id 注册服务端统一 key（用户不用自己输 key）。
-    成功返回 True；服务器没配默认 key 时返回 False。"""
-    default_key = resolve_api_key()
-    if not default_key:
-        return False
-    _set_credentials(user_id, default_key, model=DEFAULT_MODEL)
-    return True
-
-
 def create_app() -> Flask:
     app = Flask(
         __name__,
@@ -479,9 +469,8 @@ def create_app() -> Flask:
         if p.startswith("/api/") and p not in _PUBLIC_API_PATHS:
             if not session.get("user_id"):
                 return jsonify({"ok": False, "error": "请先登录。"}), 401
-            # 已登录但凭证还没注册（如服务重启后 cookie 仍在）→ 补注册服务端 key。
-            if session["user_id"] not in _client_creds:
-                _register_server_creds(session["user_id"])
+            # 登录后仍需各自连接 API Key（自带 key，或用 magic「0」走服务端 key），
+            # 见 /api/auth。这里不再自动注册服务端 key。
 
     # Load any persisted overrides from the gitignored local folder.
     global _overrides
@@ -523,8 +512,7 @@ def create_app() -> Flask:
         session["user_id"] = result
         session["username"] = username
         session.permanent = True
-        if not _register_server_creds(result):
-            return jsonify({"ok": False, "error": "服务器未配置默认 API Key，无法聊天。"}), 500
+        # 不自动注册服务端 key：登录后用户需自行在 /api/auth 连接 API Key（或「0」）。
         return jsonify({"ok": True, "user_id": result, "username": username})
 
     @app.route("/api/login", methods=["POST"])
@@ -538,8 +526,6 @@ def create_app() -> Flask:
         session["user_id"] = user_id
         session["username"] = username
         session.permanent = True
-        if not _register_server_creds(user_id):
-            return jsonify({"ok": False, "error": "服务器未配置默认 API Key，无法聊天。"}), 500
         return jsonify({"ok": True, "user_id": user_id, "username": username})
 
     @app.route("/api/logout", methods=["POST"])
@@ -551,13 +537,14 @@ def create_app() -> Flask:
     @app.route("/api/status")
     def status():
         uid = session.get("user_id")
+        has_key = _client_ready(uid)
         ctrl = _ensure_controller()
         return jsonify(
             {
-                "ready": bool(uid),
+                "ready": has_key,            # 已连接 API Key 才算 ready（≠ 仅登录）
                 "logged_in": bool(uid),
                 "username": session.get("username"),
-                "model": DEFAULT_MODEL if uid else None,
+                "model": (_client_creds.get(uid) or {}).get("model") if has_key else None,
                 "default_model": DEFAULT_MODEL,
                 "controller": {
                     "enabled": ctrl is not None,
