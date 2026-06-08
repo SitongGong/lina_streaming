@@ -149,6 +149,9 @@ class LinaPromptPlan:
     use_static_others: bool = True
     use_history_recall: bool = True
     use_cross_session_memory: bool = True
+    # 是否检索「莉娜自我事实清单」（她亲口说过的关于自己的事）。默认不查——
+    # 只在用户问及莉娜自身、或需要保持自我一致时才开，省 token、避免无关注入。
+    use_self_facts: bool = False
     query_hint: str = ""
     retrieve_k: int = 4
     history_recall_k: int = 3
@@ -192,6 +195,7 @@ class LinaPromptPlan:
         object.__setattr__(
             self, "use_cross_session_memory", _coerce_bool(self.use_cross_session_memory)
         )
+        object.__setattr__(self, "use_self_facts", _coerce_bool(self.use_self_facts))
         object.__setattr__(self, "query_hint", _normalize_text(self.query_hint)[:32])
         object.__setattr__(self, "retrieve_k", _clamp_int(self.retrieve_k, 4, 0, 8))
         object.__setattr__(self, "history_recall_k", _clamp_int(self.history_recall_k, 3, 0, 8))

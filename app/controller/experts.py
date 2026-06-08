@@ -523,6 +523,23 @@ def build_lina_advisors(
             timeout=timeout,
             run_condition=lambda ctx: ctx.has_cross_session_memory or len(ctx.history) >= 4,
         ),
+        "use_self_facts": BoolAdvisor(
+            client,
+            model=model,
+            name="use_self_facts",
+            field_name="use_self_facts",
+            target_desc=(
+                "是否检索「莉娜自我事实清单」——她在过往对话里亲口说过的、关于她自己的"
+                "稳定事实（养的猫、答应过的事、喜好、经历）。检索出相关几条注入，"
+                "帮她对自己说过的话保持前后一致。"
+            ),
+            decision_rules=(
+                "- 用户在问莉娜自己（你养宠物吗 / 你喜欢啥 / 你不是说过 / 你上次提的）→ true。\n"
+                "- 需要莉娜谈及自己的经历、偏好、之前的承诺时 → true。\n"
+                "- 纯知识问答、现代请求、与莉娜本人无关的闲聊 → false。"
+            ),
+            timeout=timeout,
+        ),
         "allow_doubt_wrap": BoolAdvisor(
             client,
             model=model,

@@ -256,6 +256,7 @@ class LinaRuleRouter:
                 use_static_others=True,
                 use_history_recall=True,
                 use_cross_session_memory=True,
+                use_self_facts=True,   # 关系回访常涉及"你之前说过…"，查自我事实
                 query_hint=_join_hint(text[:16]),
                 retrieve_k=3,
                 history_recall_k=5,
@@ -279,6 +280,7 @@ class LinaRuleRouter:
                 use_static_others=True,
                 use_history_recall=True,
                 use_cross_session_memory=ctx.has_cross_session_memory,
+                use_self_facts=True,   # 兴奋点常涉及她自己研究/经历过的东西
                 query_hint=_join_hint(text[:20]),
                 retrieve_k=5,
                 history_recall_k=3,
@@ -302,6 +304,7 @@ class LinaRuleRouter:
                 use_static_others=False,
                 use_history_recall=True,
                 use_cross_session_memory=ctx.has_cross_session_memory,
+                use_self_facts=True,   # 问莉娜自己 → 查她亲口说过的自我事实
                 query_hint=_join_hint(text[:20], "性格", "经历"),
                 retrieve_k=5,
                 history_recall_k=2,

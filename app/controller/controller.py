@@ -106,6 +106,64 @@ class LinaController:
         clash with a host that already has one running (Flask, anyio)."""
         return asyncio.run(self.dispatch(ctx))
 
+    def update_self_facts_sync(
+        self, current_facts: dict, sliding_turns: list[tuple[str, str]]
+    ) -> dict | None:
+        """Sync wrapper for update_self_facts."""
+        return asyncio.run(self.update_self_facts(current_facts, sliding_turns))
+
+    async def update_self_facts(
+        self, current_facts: dict, sliding_turns: list[tuple[str, str]]
+    ) -> dict | None:
+        """用 gpt-5-mini 把「即将滑出窗口的几轮对话」里莉娜的自我陈述，概括/合并
+        进现有自我事实清单。返回更新后的分桶 dict；无 client/出错/空 → 返回 None
+        （调用方保持旧清单不变）。
+
+        只概括「快被遗忘的那部分」，不碰窗口内原文，所以不和历史上下文重复。
+        """
+        if self._client is None or not sliding_turns:
+            return None
+        import json as _json
+
+        from ._prompts import load_prompt
+        from .experts import _parse_json_object
+
+        template = load_prompt("controller/self_facts.txt")
+        if not template:
+            return None
+        # 明确标注说话人，避免提炼模型把「用户说的」误记成「莉娜说的」。
+        # 每个 turn 是 (user_text, assistant_text)；空串表示该侧没说话（如主动发言）。
+        lines: list[str] = []
+        for u, a in sliding_turns:
+            if (u or "").strip():
+                lines.append(f"用户说：{str(u).strip()[:160]}")
+            if (a or "").strip():
+                lines.append(f"莉娜说：{str(a).strip()[:160]}")
+        sliding_text = "\n".join(lines) if lines else "(无)"
+        prompt = template.format(
+            sliding_text=sliding_text,
+            current_facts=_json.dumps(current_facts or {}, ensure_ascii=False),
+        )
+        try:
+            resp = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=800,
+                    reasoning_effort="minimal",
+                    response_format={"type": "json_object"},
+                ),
+                timeout=self._advisor_timeout,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = _parse_json_object(raw)
+            return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "update_self_facts failed: %s", f"{type(exc).__name__}: {exc}".rstrip(": ")
+            )
+            return None
+
     def pick_proactive_topic_sync(
         self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
     ) -> dict[str, Any]:
@@ -278,6 +336,7 @@ class LinaController:
             use_static_others=True,
             use_history_recall=True,
             use_cross_session_memory=ctx.has_cross_session_memory,
+            use_self_facts=merged.get("use_self_facts", False),
             query_hint=merged.get("query_hint", ""),
             retrieve_k=4,
             history_recall_k=3,
