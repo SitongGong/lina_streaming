@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 CONVERSATIONS_DIR = PROJECT_ROOT / "conversations"
+FEEDBACK_DIR = PROJECT_ROOT / "feedback"
+# 逐条消息的点赞/点踩反馈（一会话一 JSON）。
+MESSAGE_FEEDBACK_DIR = PROJECT_ROOT / "message_feedback"
+
+
+def resolve_admin_users() -> set[str]:
+    """管理员用户名集合。来自环境变量 LINA_ADMIN_USERS，逗号/空格分隔。
+
+    只有这些用户名登录后才能看到「汇总」统计页（问卷汇总 + 逐条点赞点踩汇总）。
+    未配置则返回空集合 —— 此时没有任何人能看汇总，符合「统计仅管理员可见」的默认安全姿态。
+    """
+    raw = os.environ.get("LINA_ADMIN_USERS", "")
+    return {u.strip() for u in re.split(r"[,\s]+", raw) if u.strip()}
 
 # ---- 可选账号登录（融合：登录用户走账号身份 + 独立目录；匿名用户走 client_id）----
 USERS_DIR = PROJECT_ROOT / "users"
