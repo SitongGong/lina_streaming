@@ -377,6 +377,19 @@ def _save_overrides_to_disk(d: dict[str, str]) -> None:
     )
 
 
+def _match_default_version() -> dict | None:
+    """If the active global default (`_overrides`) exactly equals some saved
+    version's overrides, return that version's {version_id, name}; else None
+    ("自定义"). Self-correcting: editing the default in the 提示词 tab makes it
+    stop matching, so the UI never shows a stale version name."""
+    cur = dict(_overrides)
+    for v in _list_versions():  # newest first
+        data = _load_version(v["version_id"])
+        if data is not None and dict(data.get("overrides", {})) == cur:
+            return {"version_id": v["version_id"], "name": v.get("name", "")}
+    return None
+
+
 def _sanitize_forced_state(fs: dict) -> dict:
     """Whitelist + clamp the user-submitted forced_state.
 
@@ -655,6 +668,7 @@ def create_app() -> Flask:
                     "has_llm": bool(ctrl and ctrl.has_llm),
                 },
                 "proactive_pacing": resolve_proactive_pacing(),
+                "default_prompt": _match_default_version(),
             }
         )
 
