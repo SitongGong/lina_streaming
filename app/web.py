@@ -28,9 +28,11 @@ from .character import CharacterEngine, DEFAULT_MODEL
 from .config import (
     CONVERSATIONS_DIR,
     FEEDBACK_DIR,
+    MESSAGE_FEEDBACK_DIR,
     PROJECT_ROOT,
     STATIC_DIR,
     USERS_FILE,
+    resolve_admin_users,
     resolve_api_key,
     resolve_openai_api_key,
     resolve_proactive_pacing,
@@ -38,7 +40,7 @@ from .config import (
 )
 from .controller import LinaController, build_default_controller
 from .conversation import ConversationStore
-from .feedback import DIMENSIONS, FeedbackStore
+from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
@@ -58,6 +60,9 @@ _ANON_CLIENT = "_anon_"               # bucket for header-less (curl/admin) call
 _engine_lock = threading.Lock()
 _store = ConversationStore(CONVERSATIONS_DIR)
 _feedback_store = FeedbackStore(FEEDBACK_DIR)
+_msg_feedback_store = MessageFeedbackStore(MESSAGE_FEEDBACK_DIR)
+# 管理员用户名集合（来自环境变量 LINA_ADMIN_USERS）。只有这些账号能看汇总统计。
+_admin_users = resolve_admin_users()
 
 # ---- 强制账号登录 ----
 # 必须登录才能聊。登录态存 Flask 签名 cookie（session["user_id"]）。
@@ -364,6 +369,20 @@ def _client_id() -> str | None:
     return session.get("user_id")
 
 
+def _is_admin() -> bool:
+    """当前登录用户是否管理员（用户名在 LINA_ADMIN_USERS 配置里）。
+
+    管理员判定用 username（而非 user_id），与环境变量里写的人类可读用户名一致。"""
+    return (session.get("username") or "") in _admin_users
+
+
+def _require_admin():
+    """返回一个 403 响应（用于 admin-only 端点的开头守卫），已是管理员则返回 None。"""
+    if not _is_admin():
+        return jsonify({"ok": False, "error": "仅管理员可查看统计数据。"}), 403
+    return None
+
+
 def _cross_session_memory(cid: str | None, current_session_id: str, query: str, k: int = 3):
     """跨会话长期记忆：检索**同一 client_id** 的其它会话里讲过的事。
 
@@ -501,7 +520,7 @@ def create_app() -> Flask:
     @app.route("/api/whoami", methods=["GET"])
     def whoami():
         uid = session.get("user_id")
-        return jsonify({"logged_in": bool(uid), "user_id": uid, "username": session.get("username")})
+        return jsonify({"logged_in": bool(uid), "user_id": uid, "username": session.get("username"), "is_admin": _is_admin()})
 
     @app.route("/api/register", methods=["POST"])
     def register():
@@ -516,7 +535,7 @@ def create_app() -> Flask:
         session["username"] = username
         session.permanent = True
         # 不自动注册服务端 key：登录后用户需自行在 /api/auth 连接 API Key（或「0」）。
-        return jsonify({"ok": True, "user_id": result, "username": username})
+        return jsonify({"ok": True, "user_id": result, "username": username, "is_admin": _is_admin()})
 
     @app.route("/api/login", methods=["POST"])
     def login():
@@ -529,7 +548,7 @@ def create_app() -> Flask:
         session["user_id"] = user_id
         session["username"] = username
         session.permanent = True
-        return jsonify({"ok": True, "user_id": user_id, "username": username})
+        return jsonify({"ok": True, "user_id": user_id, "username": username, "is_admin": _is_admin()})
 
     @app.route("/api/logout", methods=["POST"])
     def logout():
@@ -547,6 +566,7 @@ def create_app() -> Flask:
                 "ready": has_key,            # 已连接 API Key 才算 ready（≠ 仅登录）
                 "logged_in": bool(uid),
                 "username": session.get("username"),
+                "is_admin": _is_admin(),
                 "model": (_client_creds.get(uid) or {}).get("model") if has_key else None,
                 "default_model": DEFAULT_MODEL,
                 "controller": {
@@ -883,6 +903,7 @@ def create_app() -> Flask:
             {
                 "ok": True,
                 "reply": result.text,
+                "ts": conv.messages[-1].ts if conv.messages else None,
                 "mood": result.mood,
                 "prompt_version_id": conv.prompt_version_id,
                 "prompt_version_fallback": "current" if pinned_version_missing else None,
@@ -940,6 +961,7 @@ def create_app() -> Flask:
                 "ok": True,
                 "continuation": True,
                 "reply": result.text,
+                "ts": conv.messages[-1].ts if conv.messages else None,
                 "mood": result.mood,
                 "plan": result.plan,
                 "controller_trace": result.controller_trace,
@@ -1004,6 +1026,7 @@ def create_app() -> Flask:
                 "mode": "farewell" if did_farewell else "engage",
                 "farewell": did_farewell,
                 "reply": result.text,
+                "ts": conv.messages[-1].ts if conv.messages else None,
                 "mood": result.mood,
                 "plan": result.plan,
                 "controller_trace": result.controller_trace,
@@ -1163,6 +1186,7 @@ def create_app() -> Flask:
                                 "type": "done",
                                 "mood": ev.get("mood"),
                                 "text": ev.get("text", ""),
+                                "ts": conv.messages[-1].ts if conv.messages else None,
                                 "forced_state": conv.forced_state,  # None after one-shot consumption
                                 "usage": ev.get("usage"),
                                 "retrieved": [
@@ -1207,13 +1231,17 @@ def create_app() -> Flask:
 
     @app.route("/api/feedback/summary", methods=["GET"])
     def feedback_summary():
-        # Aggregate ALL testers' questionnaires — this is the developer-facing
-        # overview for improving Lina, so it is intentionally not scoped to the
-        # requesting browser (unlike the per-client session sidebar).
+        # 统计数据仅管理员可见。聚合全部测评者的问卷。
+        denied = _require_admin()
+        if denied:
+            return denied
         return jsonify(_feedback_store.summary(None))
 
     @app.route("/api/feedback/export", methods=["GET"])
     def feedback_export():
+        denied = _require_admin()
+        if denied:
+            return denied
         records = [r.to_dict() for r in _feedback_store.list_records(None)]
         payload = json.dumps(records, ensure_ascii=False, indent=2)
         return Response(
@@ -1250,6 +1278,45 @@ def create_app() -> Flask:
     def feedback_get(session_id: str):
         record = _feedback_store.load(session_id)
         return jsonify({"feedback": record.to_dict() if record else None})
+
+    # ---------- Per-message thumbs feedback ----------
+    # 每条助手回复上的 👍/👎 + 可选理由。任意登录用户都可对自己会话里的消息打分；
+    # 但聚合统计（/summary）仅管理员可见。一会话一 JSON，按消息 ts 作 key。
+
+    @app.route("/api/message-feedback/summary", methods=["GET"])
+    def message_feedback_summary():
+        denied = _require_admin()
+        if denied:
+            return denied
+        return jsonify(_msg_feedback_store.summary())
+
+    @app.route("/api/message-feedback", methods=["POST"])
+    def message_feedback_set():
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"ok": False, "error": "缺少 session_id"}), 400
+        session_title = ""
+        if _store._path(session_id).exists():
+            session_title = _store.load(session_id).title
+        try:
+            entry = _msg_feedback_store.set(
+                session_id=session_id,
+                message_ts=data.get("message_ts"),
+                rating=data.get("rating"),          # "up" | "down" | "" (clear)
+                reason=data.get("reason") or "",
+                user_id=_client_id(),
+                text=data.get("text") or "",
+                session_title=session_title,
+            )
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "entry": entry})
+
+    @app.route("/api/message-feedback/<session_id>", methods=["GET"])
+    def message_feedback_for_session(session_id: str):
+        # 回显某会话里已打分的消息（按 ts），供前端加载历史时还原按钮状态。
+        return jsonify({"items": _msg_feedback_store.list_for_session(session_id)})
 
     # ---------- Prompt override endpoints ----------
 

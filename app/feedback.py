@@ -230,3 +230,129 @@ class FeedbackStore:
             "dimensions": dims,
             "others": others,
         }
+
+
+# ---- Per-message thumbs feedback ----
+# Lighter-weight than the questionnaire: a 👍/👎 + optional reason on each
+# individual assistant reply. One JSON per session keyed by the message's `ts`:
+#   message_feedback/<session_id>.json = {
+#     "<ts>": {"ts": float, "rating": "up"|"down", "reason": str,
+#              "user_id": str|None, "text": str, "session_title": str,
+#              "updated_at": float},
+#     ...
+#   }
+
+MSG_RATINGS = {"up", "down"}
+MSG_REASON_MAX = 1000
+MSG_TEXT_MAX = 300
+
+
+class MessageFeedbackStore:
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, session_id: str) -> Path:
+        return self.root / f"{_safe_session_id(session_id)}.json"
+
+    def load(self, session_id: str) -> dict:
+        p = self._path(session_id)
+        if not p.exists():
+            return {}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save(self, session_id: str, data: dict) -> None:
+        self._path(session_id).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def set(
+        self,
+        session_id: str,
+        message_ts,
+        rating,
+        reason: str = "",
+        user_id: str | None = None,
+        text: str = "",
+        session_title: str = "",
+    ) -> dict | None:
+        """Upsert one message's rating. An empty/None rating clears it.
+
+        Returns the stored entry, or None when cleared. Raises ValueError on a
+        malformed rating."""
+        try:
+            ts = float(message_ts)
+        except (TypeError, ValueError):
+            raise ValueError("message_ts 必须是数字。")
+        key = repr(ts)
+        data = self.load(session_id)
+        if not rating:
+            data.pop(key, None)
+            self._save(session_id, data)
+            return None
+        if rating not in MSG_RATINGS:
+            raise ValueError("rating 必须是 up 或 down。")
+        if not isinstance(reason, str):
+            raise ValueError("reason 必须是文本。")
+        entry = {
+            "ts": ts,
+            "rating": rating,
+            "reason": reason.strip()[:MSG_REASON_MAX],
+            "user_id": user_id,
+            "text": (text or "").strip()[:MSG_TEXT_MAX],
+            "session_title": session_title,
+            "updated_at": time.time(),
+        }
+        data[key] = entry
+        self._save(session_id, data)
+        return entry
+
+    def list_for_session(self, session_id: str) -> list[dict]:
+        """All entries for one session, as a list carrying numeric `ts` so the
+        frontend can match each to its message bubble by exact value."""
+        return list(self.load(session_id).values())
+
+    def summary(self) -> dict:
+        """Aggregate across all sessions: up/down counts + the full item list
+        (each with its message excerpt + reason), newest first."""
+        up = down = 0
+        items: list[dict] = []
+        for p in self.root.glob("*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            sid = p.stem
+            for entry in data.values():
+                rating = entry.get("rating")
+                if rating == "up":
+                    up += 1
+                elif rating == "down":
+                    down += 1
+                else:
+                    continue
+                items.append(
+                    {
+                        "rating": rating,
+                        "reason": (entry.get("reason") or "").strip(),
+                        "text": entry.get("text") or "",
+                        "session_id": sid,
+                        "session_title": entry.get("session_title") or "",
+                        "user_id": entry.get("user_id"),
+                        "ts": entry.get("ts"),
+                        "updated_at": entry.get("updated_at", 0),
+                    }
+                )
+        items.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
+        return {
+            "up": up,
+            "down": down,
+            "total": up + down,
+            "items": items,
+        }
