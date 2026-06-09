@@ -396,17 +396,59 @@ class LinaController:
         )
 
 
+class _AnthropicCompatCompletions:
+    """Adapt AsyncOpenAI's `chat.completions.create` for Anthropic's
+    OpenAI-compatible endpoint by rewriting the GPT-5-only kwargs the
+    controller passes:
+      - drop `reasoning_effort` (OpenAI reasoning models only),
+      - map `max_completion_tokens` → `max_tokens` (Anthropic requires the latter),
+      - drop `response_format` (the compat endpoint doesn't enforce JSON mode;
+        prompts already demand JSON and `_parse_json_object` is tolerant).
+    Everything else passes through untouched.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def create(self, **kwargs: Any):
+        kwargs.pop("reasoning_effort", None)
+        if "max_completion_tokens" in kwargs:
+            kwargs.setdefault("max_tokens", kwargs.pop("max_completion_tokens"))
+        kwargs.pop("response_format", None)
+        return await self._inner.create(**kwargs)
+
+
+class _AnthropicCompatChat:
+    def __init__(self, inner: Any) -> None:
+        self.completions = _AnthropicCompatCompletions(inner.completions)
+
+
+class _AnthropicCompatClient:
+    """Minimal shim over an AsyncOpenAI client exposing only the slice the
+    controller uses (`client.chat.completions.create`), adapted for Anthropic."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.chat = _AnthropicCompatChat(inner.chat)
+
+
 def build_default_controller(
     *,
     api_key: Optional[str] = None,
     model: str = DEFAULT_CONTROLLER_MODEL,
     base_url: Optional[str] = None,
+    provider: str = "openai",
 ) -> LinaController:
-    """Construct a controller wired to OpenAI (or any compatible base_url).
+    """Construct a controller wired to OpenAI (or any OpenAI-compatible base_url).
+
+    `provider="anthropic"` targets Anthropic's OpenAI-compatible endpoint: the
+    key is the Anthropic key (no fallback to OPENAI_API_KEY), the base_url
+    defaults to Anthropic's, and the client is wrapped so the GPT-5-only kwargs
+    are normalized for Claude.
 
     Returns a controller with no LLM client (rule-layer + fallback only)
-    when `api_key` is empty and `OPENAI_API_KEY` is not set — *not* an
-    error. lina should still chat fine without a controller key.
+    when no key is available — *not* an error. lina should still chat fine
+    without a controller key.
 
     A flag `LINA_CONTROLLER=off` disables LLM advisors entirely; the
     rule layer still fires so cheap scenarios stay tight.
@@ -416,7 +458,12 @@ def build_default_controller(
     """
     total_timeout, advisor_timeout = _resolve_timeouts()
     enabled = (os.environ.get("LINA_CONTROLLER") or "on").strip().lower() != "off"
-    resolved_key = api_key or os.environ.get("OPENAI_API_KEY") or ""
+    provider = (provider or "openai").strip().lower()
+    if provider == "anthropic":
+        resolved_key = api_key or ""   # 不回退到 OPENAI_API_KEY
+        base_url = base_url or "https://api.anthropic.com/v1/"
+    else:
+        resolved_key = api_key or os.environ.get("OPENAI_API_KEY") or ""
     if not enabled or not resolved_key:
         return LinaController(
             openai_client=None, model_name=model,
@@ -441,6 +488,8 @@ def build_default_controller(
             openai_client=None, model_name=model,
             timeout=total_timeout, advisor_timeout=advisor_timeout,
         )
+    if provider == "anthropic":
+        client = _AnthropicCompatClient(client)
     return LinaController(
         openai_client=client, model_name=model,
         timeout=total_timeout, advisor_timeout=advisor_timeout,

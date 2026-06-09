@@ -34,6 +34,7 @@ from .config import (
     USERS_FILE,
     resolve_admin_users,
     resolve_api_key,
+    resolve_controller_settings,
     resolve_openai_api_key,
     resolve_proactive_pacing,
     resolve_secret_key,
@@ -162,7 +163,13 @@ def _ensure_controller() -> LinaController | None:
         return _controller
     with _engine_lock:
         if _controller is None:
-            _controller = build_default_controller(api_key=resolve_openai_api_key())
+            cfg = resolve_controller_settings()
+            _controller = build_default_controller(
+                api_key=cfg["api_key"],
+                model=cfg["model"],
+                base_url=cfg["base_url"],
+                provider=cfg["provider"],
+            )
         return _controller
 
 # ---------- Prompt-override layer ----------

@@ -88,6 +88,57 @@ def resolve_openai_api_key(explicit: str | None = None) -> str | None:
     return None
 
 
+# Controller LLM provider settings. Anthropic exposes an OpenAI-compatible
+# endpoint, so the same OpenAI-SDK-based controller can talk to Claude.
+ANTHROPIC_OPENAI_COMPAT_BASE_URL = "https://api.anthropic.com/v1/"
+_DEFAULT_OPENAI_CONTROLLER_MODEL = "gpt-5-mini"
+_DEFAULT_ANTHROPIC_CONTROLLER_MODEL = "claude-haiku-4-5-20251001"
+
+
+def resolve_controller_settings() -> dict:
+    """决定 controller（规则层之上的 LLM 顾问 / 回复切分 / 自我记忆）用哪个 provider。
+
+    provider 由 LINA_CONTROLLER_PROVIDER 指定（"anthropic" | "openai"）；未指定时
+    自动推断：有 OPENAI_API_KEY → openai；否则有 Anthropic key → anthropic（走其
+    OpenAI 兼容端点，模型默认用 Claude Haiku）；都没有 → none（退到只走规则层）。
+
+    覆盖项：LINA_CONTROLLER_MODEL、LINA_CONTROLLER_BASE_URL。
+    返回 {provider, api_key, model, base_url}。
+    """
+    provider = (os.environ.get("LINA_CONTROLLER_PROVIDER") or "").strip().lower()
+    openai_key = resolve_openai_api_key()
+    anthropic_key = resolve_api_key()
+    if not provider:
+        if openai_key:
+            provider = "openai"
+        elif anthropic_key:
+            provider = "anthropic"
+        else:
+            provider = "none"
+    model_override = (os.environ.get("LINA_CONTROLLER_MODEL") or "").strip() or None
+    base_override = (os.environ.get("LINA_CONTROLLER_BASE_URL") or "").strip() or None
+    if provider == "anthropic":
+        return {
+            "provider": "anthropic",
+            "api_key": anthropic_key,
+            "model": model_override or _DEFAULT_ANTHROPIC_CONTROLLER_MODEL,
+            "base_url": base_override or ANTHROPIC_OPENAI_COMPAT_BASE_URL,
+        }
+    if provider == "openai":
+        return {
+            "provider": "openai",
+            "api_key": openai_key,
+            "model": model_override or _DEFAULT_OPENAI_CONTROLLER_MODEL,
+            "base_url": base_override,
+        }
+    return {
+        "provider": "none",
+        "api_key": None,
+        "model": model_override or _DEFAULT_OPENAI_CONTROLLER_MODEL,
+        "base_url": base_override,
+    }
+
+
 def resolve_proactive_pacing() -> dict:
     """主动发言 / 续说的节奏参数（"magic numbers"）。
 
