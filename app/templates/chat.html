@@ -2307,6 +2307,7 @@ async function send() {
     state.lastMeta = data.mood || state.lastMeta;
     renderChunks(data.retrieved, data.retrieved_history);
     renderUsage(data.usage);
+    speakText(data.reply, data.mood, { interrupt: true });  // 文字输入也朗读
     // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
@@ -3474,6 +3475,29 @@ function stopAudio() {
   voice.playing = false;
 }
 
+// Speak an assistant message via TTS into the playback queue, so TEXT replies
+// (and continuation / proactive messages) are voiced too — not just the voice
+// path. Best-effort: silently no-ops when the voice models aren't loaded, so
+// text chat still works when TTS is unavailable. `opts.interrupt` stops any
+// currently-playing/queued audio first (used for a fresh user turn).
+async function speakText(text, mood, opts = {}) {
+  if (voice.modelState !== 'ready') return;
+  const t = (text || '').trim();
+  if (!t) return;
+  try {
+    const res = await fetch('/api/voice/say', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
+      body: JSON.stringify({ text: t, mood: mood || null }),
+    });
+    if (!res.ok) return;   // synthesis failed — text is already shown, stay silent
+    const url = URL.createObjectURL(await res.blob());
+    if (opts.interrupt) stopAudio();
+    voice.audioQueue.push(url);
+    playNextAudio();
+  } catch (e) { /* best-effort; text already shown */ }
+}
+
 // ---- Per-message replay (🔊) ----
 function playReplay(url, btn) {
   stopAudio();                       // interrupt any live/queued audio
@@ -3772,6 +3796,7 @@ async function runContinue() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
+      speakText(data.reply, data.mood);  // 续说段也朗读（接在上一段之后播）
       state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
       await loadSessions();
       scrollToBottom();
@@ -3809,6 +3834,7 @@ async function runProactive() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
+      speakText(data.reply, data.mood);  // 主动找话也朗读
       await loadSessions();
       scrollToBottom();
       // 告别了就把计数拉满 → 之后 maybeProactive 不再发起；否则推进一档。
