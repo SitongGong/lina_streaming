@@ -414,6 +414,23 @@ def build_lina_advisors(
             maximum=300,
             timeout=timeout,
         ),
+        "allow_segment": BoolAdvisor(
+            client,
+            model=model,
+            name="allow_segment",
+            field_name="allow_segment",
+            target_desc=(
+                "本轮是否**允许把回复拆成多小段**（第一段先发，其余在用户沉默时逐段补完，"
+                "像发微信连发）。这是给主模型的「切分许可」，主模型在许可下自己决定实际切几段。"
+            ),
+            decision_rules=(
+                "- 本轮内容**会有多个独立的意思 / 会展开讲**（讲经历、列举、抛带后续的钩子）→ true。\n"
+                "- 用户问开放/需要详述的问题（讲讲你…、慢慢说、详细说说）→ true。\n"
+                "- 只是一两口气说完的短回复（问候、短反应、简单接话、能力边界拒绝、告别）→ false。\n"
+                "- 安抚低落情绪时倾向 false（一段一段补会显得不专注）。"
+            ),
+            timeout=timeout,
+        ),
         # --- modules ---
         "module_user_vent": BoolAdvisor(
             client,
@@ -522,6 +539,23 @@ def build_lina_advisors(
             ),
             timeout=timeout,
             run_condition=lambda ctx: ctx.has_cross_session_memory or len(ctx.history) >= 4,
+        ),
+        "use_self_facts": BoolAdvisor(
+            client,
+            model=model,
+            name="use_self_facts",
+            field_name="use_self_facts",
+            target_desc=(
+                "是否检索「莉娜自我事实清单」——她在过往对话里亲口说过的、关于她自己的"
+                "稳定事实（养的猫、答应过的事、喜好、经历）。检索出相关几条注入，"
+                "帮她对自己说过的话保持前后一致。"
+            ),
+            decision_rules=(
+                "- 用户在问莉娜自己（你养宠物吗 / 你喜欢啥 / 你不是说过 / 你上次提的）→ true。\n"
+                "- 需要莉娜谈及自己的经历、偏好、之前的承诺时 → true。\n"
+                "- 纯知识问答、现代请求、与莉娜本人无关的闲聊 → false。"
+            ),
+            timeout=timeout,
         ),
         "allow_doubt_wrap": BoolAdvisor(
             client,

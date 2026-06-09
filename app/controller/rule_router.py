@@ -116,6 +116,7 @@ class LinaRuleRouter:
                 max_reply_chars=60,
                 tone_hint="温柔",
                 allow_doubt_wrap=False,
+                allow_segment=False,   # 告别要短，不拆段
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="proactive_farewell",
@@ -138,6 +139,7 @@ class LinaRuleRouter:
                 sentences=2,
                 max_reply_chars=60,
                 tone_hint="自然",
+                allow_segment=False,   # 主动开口是一小句，不拆段
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="proactive_engage",
@@ -159,6 +161,7 @@ class LinaRuleRouter:
                 sentences=2,
                 max_reply_chars=50,
                 tone_hint="自然",
+                allow_segment=False,   # 续说本身就是一小段，不再二次拆
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="continuation",
@@ -203,6 +206,7 @@ class LinaRuleRouter:
                 history_window=4,
                 sentences=1,
                 max_reply_chars=30,
+                allow_segment=False,
                 trace_source="rule",
                 matched_rule="empty_input",
             )
@@ -222,6 +226,7 @@ class LinaRuleRouter:
                 max_reply_chars=55,
                 tone_hint="疑惑",
                 allow_doubt_wrap=True,
+                allow_segment=False,   # 能力边界回应要干脆，不拆段
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="modern_action_request",
@@ -256,6 +261,7 @@ class LinaRuleRouter:
                 use_static_others=True,
                 use_history_recall=True,
                 use_cross_session_memory=True,
+                use_self_facts=True,   # 关系回访常涉及"你之前说过…"，查自我事实
                 query_hint=_join_hint(text[:16]),
                 retrieve_k=3,
                 history_recall_k=5,
@@ -279,6 +285,7 @@ class LinaRuleRouter:
                 use_static_others=True,
                 use_history_recall=True,
                 use_cross_session_memory=ctx.has_cross_session_memory,
+                use_self_facts=True,   # 兴奋点常涉及她自己研究/经历过的东西
                 query_hint=_join_hint(text[:20]),
                 retrieve_k=5,
                 history_recall_k=3,
@@ -302,6 +309,7 @@ class LinaRuleRouter:
                 use_static_others=False,
                 use_history_recall=True,
                 use_cross_session_memory=ctx.has_cross_session_memory,
+                use_self_facts=True,   # 问莉娜自己 → 查她亲口说过的自我事实
                 query_hint=_join_hint(text[:20], "性格", "经历"),
                 retrieve_k=5,
                 history_recall_k=2,
@@ -332,6 +340,7 @@ class LinaRuleRouter:
                 max_reply_chars=30,
                 tone_hint="温柔" if is_farewell else "自然",
                 allow_doubt_wrap=False,
+                allow_segment=False,   # 问候/告别一句话，不拆段
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="plain_farewell" if is_farewell else "plain_greeting",
@@ -351,6 +360,7 @@ class LinaRuleRouter:
                 max_reply_chars=24,
                 tone_hint="轻松",
                 allow_doubt_wrap=False,
+                allow_segment=False,   # 短反应一句话，不拆段
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="short_reaction",

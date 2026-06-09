@@ -42,6 +42,7 @@ from .controller import LinaController, build_default_controller
 from .conversation import ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
+from .self_facts import SelfFactsStore
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
@@ -69,6 +70,76 @@ _admin_users = resolve_admin_users()
 # 登录后「身份」就是 user_id —— 会话按 user_id 打标隔离、检索按 user_id 隔离、
 # 引擎凭证按 user_id 注册（统一用服务端 key，用户不再自己输 key）。
 _user_store = UserStore(USERS_FILE)
+# 莉娜对每个用户的「自我事实清单」（跨会话共享，按 user_id 存）。
+_self_facts_store = SelfFactsStore(USERS_FILE.parent / "self_facts")
+
+
+def _spawn_self_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
+    """后台线程：让 controller LLM 把刚滑出窗口的几轮概括进该用户的自我事实清单。
+    不阻塞 HTTP 响应。重新读一次清单避免覆盖并发写；store 自带锁。"""
+    if not user_id or not slid_turns:
+        return
+    ctrl = _ensure_controller()
+    if ctrl is None or not ctrl.has_llm:
+        return
+
+    def _work():
+        try:
+            base = _self_facts_store.load(user_id) or current_facts
+            updated = ctrl.update_self_facts_sync(base, slid_turns)
+            if updated is not None:
+                _self_facts_store.save(user_id, updated)
+        except Exception:
+            pass  # 后台尽力而为，失败不影响主流程
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _spawn_self_facts_backfill(user_id: str) -> None:
+    """登录后一次性回填：若清单还空、但该用户已有历史会话，把全部历史分批喂给
+    controller LLM 提炼，补进自我事实清单。之后增量机制（滑出窗口）接管。
+    后台线程跑，不阻塞登录响应；只在清单为空时跑，避免重复。"""
+    if not user_id:
+        return
+    ctrl = _ensure_controller()
+    if ctrl is None or not ctrl.has_llm:
+        return
+    if _self_facts_store.load(user_id):
+        return  # 已有清单，不重复回填
+
+    def _work():
+        try:
+            # 收集该用户所有会话的 (user, assistant) 对（跳过 system_trigger 占位）。
+            pairs: list[tuple[str, str]] = []
+            for conv in _store.iter_sessions():
+                if getattr(conv, "client_id", None) != user_id:
+                    continue
+                pending_u = None
+                for m in conv.messages:
+                    if m.role == "user":
+                        if m.meta and m.meta.get("system_trigger"):
+                            continue
+                        pending_u = (m.content or "").strip()
+                    elif m.role == "assistant":
+                        a = (m.content or "").strip()
+                        pairs.append((pending_u or "", a))
+                        pending_u = None
+            if not pairs:
+                return
+            # 分批提炼（每批 6 轮），逐步合并进清单。
+            facts: dict = {}
+            BATCH = 6
+            for i in range(0, len(pairs), BATCH):
+                batch = pairs[i : i + BATCH]
+                updated = ctrl.update_self_facts_sync(facts, batch)
+                if updated is not None:
+                    facts = updated
+            if facts:
+                _self_facts_store.save(user_id, facts)
+        except Exception:
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
 # 这些 /api 路径无需登录即可访问；其余 /api 一律要求已登录。
 _PUBLIC_API_PATHS = {
     "/api/status",
@@ -548,6 +619,9 @@ def create_app() -> Flask:
         session["user_id"] = user_id
         session["username"] = username
         session.permanent = True
+        # 登录后一次性回填：把该用户的历史会话提炼进自我事实清单（仅清单空时）。
+        # 沿用 upstream 鉴权模型——不自动注册服务端 key，用户自行 /api/auth 连接。
+        _spawn_self_facts_backfill(user_id)
         return jsonify({"ok": True, "user_id": user_id, "username": username, "is_admin": _is_admin()})
 
     @app.route("/api/logout", methods=["POST"])
@@ -890,14 +964,21 @@ def create_app() -> Flask:
 
         # 跨会话用户记忆：让莉娜记住该用户（同 client_id）在别的会话里讲过的事。
         extra_memory = _cross_session_memory(cid, session_id, message)
+        # 莉娜的自我事实清单（按 user_id 跨会话共享）——注入让她对自己说过的话一致。
+        self_facts = _self_facts_store.load(cid)
 
         try:
             result = engine.chat(
-                conv, message, extra_memory_chunks=extra_memory, quoted_text=quoted_text
+                conv, message, extra_memory_chunks=extra_memory,
+                quoted_text=quoted_text, self_facts=self_facts,
             )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
+        # 自我事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
+        # 概括的是旧对话，晚一两秒、下一轮生效完全无妨。
+        if result.slid_out_turns:
+            _spawn_self_facts_update(cid, dict(self_facts or {}), list(result.slid_out_turns))
 
         return jsonify(
             {
@@ -1015,6 +1096,9 @@ def create_app() -> Flask:
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
+        # 莉娜主动讲的（尤其自己的经历）也记进自我事实清单（后台异步）。
+        if result.slid_out_turns:
+            _spawn_self_facts_update(cid, dict(_self_facts_store.load(cid)), list(result.slid_out_turns))
 
         # 真正是不是告别，由后端权威计数决定（可能覆盖了请求的 mode）。读最后一条
         # assistant 的 meta 为准，让前端据此停止后续主动。
@@ -1131,9 +1215,10 @@ def create_app() -> Flask:
 
         ve = get_voice_engine()
         tts_ready = ve.status()["state"] == "ready"
+        voice_self_facts = _self_facts_store.load(cid)  # 注入自我事实（语音路径只读不更新）
 
         def event_stream():
-            gen = engine.chat_stream(conv, message)
+            gen = engine.chat_stream(conv, message, self_facts=voice_self_facts)
             pending = ""        # visible text not yet flushed to a TTS sentence
             cur_mood = None     # latest parsed mood — drives TTS delivery style
             idx = 0             # audio chunk ordering index

@@ -149,6 +149,9 @@ class LinaPromptPlan:
     use_static_others: bool = True
     use_history_recall: bool = True
     use_cross_session_memory: bool = True
+    # 是否检索「莉娜自我事实清单」（她亲口说过的关于自己的事）。默认不查——
+    # 只在用户问及莉娜自身、或需要保持自我一致时才开，省 token、避免无关注入。
+    use_self_facts: bool = False
     query_hint: str = ""
     retrieve_k: int = 4
     history_recall_k: int = 3
@@ -177,6 +180,12 @@ class LinaPromptPlan:
     max_reply_chars: int = 45
     tone_hint: str = ""
 
+    # 切段预算（由 controller 给，主模型在预算内自己决定实际切几段）：
+    # allow_segment=本轮准不准把回复拆成多小段；max_segments=最多拆几段（含已发的第一段）。
+    # 短反应/问候/告别/能力边界等场景关掉，避免硬凑分段；可展开的场景才开。
+    allow_segment: bool = True
+    max_segments: int = 3
+
     # mood continuity
     enforce_mood_continuity: bool = True
 
@@ -192,6 +201,7 @@ class LinaPromptPlan:
         object.__setattr__(
             self, "use_cross_session_memory", _coerce_bool(self.use_cross_session_memory)
         )
+        object.__setattr__(self, "use_self_facts", _coerce_bool(self.use_self_facts))
         object.__setattr__(self, "query_hint", _normalize_text(self.query_hint)[:32])
         object.__setattr__(self, "retrieve_k", _clamp_int(self.retrieve_k, 4, 0, 8))
         object.__setattr__(self, "history_recall_k", _clamp_int(self.history_recall_k, 3, 0, 8))
@@ -213,6 +223,8 @@ class LinaPromptPlan:
         object.__setattr__(self, "allow_doubt_wrap", _coerce_bool(self.allow_doubt_wrap))
         object.__setattr__(self, "sentences", _clamp_int(self.sentences, 2, 1, 10))
         object.__setattr__(self, "max_reply_chars", _clamp_int(self.max_reply_chars, 45, 20, 300))
+        object.__setattr__(self, "allow_segment", _coerce_bool(self.allow_segment))
+        object.__setattr__(self, "max_segments", _clamp_int(self.max_segments, 3, 1, 3))
         object.__setattr__(self, "tone_hint", _normalize_text(self.tone_hint)[:12])
         object.__setattr__(self, "enforce_mood_continuity", _coerce_bool(self.enforce_mood_continuity))
         object.__setattr__(self, "trace_source", _normalize_text(self.trace_source) or "fallback")

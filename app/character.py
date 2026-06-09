@@ -351,6 +351,9 @@ class ChatResult:
     pending_segments: list[str] = field(default_factory=list)
     # Marks a reply produced by continue_segment() (a follow-up chunk).
     is_continuation: bool = False
+    # 「刚滑出窗口、待概括进自我事实清单」的几轮对话对（空 = 无）。
+    # web 层据此在后台异步跑概括，不阻塞回复。
+    slid_out_turns: list = field(default_factory=list)
 
 
 def parse_mood_tag(raw: str) -> tuple[str, dict | None]:
@@ -561,6 +564,7 @@ class CharacterEngine:
         is_forced: bool = False,
         is_first_turn: bool = False,
         quoted_text: str = "",
+        self_facts_text: str = "",
     ) -> str:
         sections: list[str] = []
 
@@ -596,6 +600,16 @@ class CharacterEngine:
                     "</近况>"
                 )
 
+        # 莉娜的「自我事实清单」命中项——由 controller 决定本轮是否检索（第 4 个
+        # 检索库），按当前话题 BM25 检出相关几条（不再整份常驻）。她亲口说过、
+        # 人设文件里没写的稳定事实（养猫、承诺、喜好…），保证自我一致。
+        if self_facts_text:
+            sections.append(
+                "<莉娜的自我设定记忆 — 你（莉娜）之前亲口说过的、与本轮相关的关于你自己的事实。"
+                "务必与这些保持一致，不要自相矛盾；自然引用即可，不要生硬复述。>\n"
+                f"{self_facts_text}\n</莉娜的自我设定记忆>"
+            )
+
         if retrieved:
             static_text = "\n\n".join(c.render() for c in retrieved)
             sections.append(
@@ -630,6 +644,7 @@ class CharacterEngine:
         *,
         extra_memory_chunks: list[Chunk] | None = None,
         quoted_text: str = "",
+        self_facts: dict | None = None,
     ) -> dict:
         """Shared setup for chat() and chat_stream(): controller dispatch,
         plan-driven RAG, mood seeding, the assembled API `messages` list, and
@@ -645,6 +660,15 @@ class CharacterEngine:
         # 2) RAG controlled by the plan (falls back to instance defaults when
         #    no controller is wired in).
         rag_query = plan.query_hint or user_message
+        # 自我事实清单作为第 4 个检索库：仅当 plan.use_self_facts 时，按当前话题
+        # BM25 检索命中的几条注入（不再整份常驻），省 token、避免无关注入。
+        self_facts_text = ""
+        if self_facts and (plan.use_self_facts or self._controller is None):
+            try:
+                from .self_facts import SelfFactsStore
+                self_facts_text = SelfFactsStore.search(self_facts, rag_query, k=5)
+            except Exception:
+                self_facts_text = ""
         retrieve_k = plan.retrieve_k if self._controller is not None else self.retrieve_k
         retrieved_raw = self.rag.retrieve(rag_query, k=retrieve_k) if retrieve_k > 0 else []
         retrieved = (
@@ -705,6 +729,7 @@ class CharacterEngine:
                     is_forced=bool(forced),
                     is_first_turn=is_first_turn,
                     quoted_text=quoted_text,
+                    self_facts_text=self_facts_text,
                 ),
             }
         ]
@@ -720,24 +745,44 @@ class CharacterEngine:
             "plan_trace": plan_trace,
         }
 
+    def _slid_out_turns(
+        self, conversation: Conversation, history_window: int
+    ) -> list[tuple[str, str]]:
+        """返回「刚滑出 history_window、值得抢救进自我事实清单」的几轮对话对。
+        纯计算、无 LLM 调用——真正的概括由调用方在后台异步跑（不阻塞用户）。
+
+        只取窗口边界往外的一小段（最多 4 轮），既不重复窗口内原文，又在它彻底
+        消失前抓住关键自我陈述。"""
+        if self._controller is None or not self._controller.has_llm:
+            return []
+        pairs = self._history_pairs_for_controller(conversation)
+        if len(pairs) <= history_window:
+            return []  # 还没滑出任何轮次
+        slid_end = len(pairs) - history_window
+        slid_start = max(0, slid_end - 4)
+        return list(pairs[slid_start:slid_end])
+
     def chat(
         self,
         conversation: Conversation,
         user_message: str,
         extra_memory_chunks: list[Chunk] | None = None,
         quoted_text: str = "",
+        self_facts: dict | None = None,
     ) -> ChatResult:
         prep = self._prepare(
             conversation,
             user_message,
             extra_memory_chunks=extra_memory_chunks,
             quoted_text=quoted_text,
+            self_facts=self_facts,
         )
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
         plan = prep["plan"]
         plan_trace = prep["plan_trace"]
+        history_window = plan.history_window if self._controller is not None else self.history_window
 
         response = self.client.messages.create(
             model=self.model,
@@ -751,6 +796,12 @@ class CharacterEngine:
         # Strip leading mood tag, then trailing segment-plan tag.
         cleaned_reply, mood = parse_mood_tag(raw_reply)
         cleaned_reply, segments = parse_segments_tag(cleaned_reply)
+        # 尊重 controller 的切分预算：本轮不准拆 → 丢弃模型可能误带的段；
+        # 准拆 → 按 plan.max_segments 截断。（parse 已先剥掉标记，不会外露。）
+        if self._controller is not None and not plan.allow_segment:
+            segments = []
+        else:
+            segments = segments[: max(0, plan.max_segments - 1)]  # 第一段已发，余下 max-1 段
         # A fresh user turn invalidates any earlier split plan, installs this one.
         conversation.pending_segments = segments or None
 
@@ -760,6 +811,10 @@ class CharacterEngine:
         # forced_state is one-shot: consumed by the turn it influenced.
         if forced:
             conversation.forced_state = None
+
+        # 自我事实清单：算出「刚滑出窗口、待概括」的几轮（纯计算，不调 LLM）。
+        # 真正的概括由 web 层在后台线程异步跑，不阻塞本次回复返回。
+        slid_out = self._slid_out_turns(conversation, history_window)
 
         usage = response.usage
         return ChatResult(
@@ -774,9 +829,10 @@ class CharacterEngine:
             plan=plan.to_dict(),
             controller_trace=plan_trace,
             pending_segments=list(segments),
+            slid_out_turns=slid_out,
         )
 
-    def chat_stream(self, conversation: Conversation, user_message: str):
+    def chat_stream(self, conversation: Conversation, user_message: str, self_facts: dict | None = None):
         """Streaming counterpart to chat(). A generator yielding event dicts:
 
             {"type": "mood",  "mood": {...}|None}   — emitted once, as soon as
@@ -793,7 +849,7 @@ class CharacterEngine:
         aborting the Anthropic request, and nothing is saved. That matches the
         product rule: a barged-in turn is treated as a mistake and discarded.
         """
-        prep = self._prepare(conversation, user_message)
+        prep = self._prepare(conversation, user_message, self_facts=self_facts)
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
@@ -1103,6 +1159,11 @@ class CharacterEngine:
             meta["topic_hook"] = topic_hook   # 记下本次话头，供下次去重
         conversation.add("assistant", cleaned_reply, meta=meta)
 
+        # 主动发言里莉娜**主动讲了自己的经历**（尤其 self 级），这是最该记进自我
+        # 事实清单的内容。把这次自述作为一对 turn 交出去，让 web 层后台概括入库。
+        # （engage 接用户话题那两级也带上，里面若有她的自我信息一并被提炼。）
+        slid_out = [("", cleaned_reply)] if cleaned_reply else []
+
         usage = response.usage
         return ChatResult(
             text=cleaned_reply,
@@ -1115,6 +1176,7 @@ class CharacterEngine:
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             plan=plan.to_dict(),
             controller_trace=plan_trace,
+            slid_out_turns=slid_out,
         )
 
     # 续说指令：把上一条回复 parse 出来的某个小段要点，自然展开成一小段。

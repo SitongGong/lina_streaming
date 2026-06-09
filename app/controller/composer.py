@@ -99,6 +99,15 @@ class LinaPromptComposer:
             lines.append("- mood 与上一轮连贯，不要突变（除非用户做了明显冒犯或惊喜的事）")
         if not plan.allow_doubt_wrap:
             lines.append("- 本轮不要用「我也不太确定 / 让我想想」开头；直接温柔或坦率地接")
+        # 切分预算：覆盖「分段说话机制」里那个"你自己判断要不要拆"。
+        # 由 controller 给框——不准拆就直接说完；准拆则给上限，主模型在框内自定。
+        if not plan.allow_segment:
+            lines.append("- 本轮**不要分段**（不输出 [segments:…]），一口气把话说完即可。")
+        else:
+            lines.append(
+                f"- 本轮**如果有多个意思**可以分段说：第一段先发，其余写进 [segments:…]，"
+                f"最多 {plan.max_segments} 段；只有一个意思就别硬凑。"
+            )
         return "\n".join(lines)
 
     @staticmethod
