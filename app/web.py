@@ -1365,9 +1365,20 @@ def create_app() -> Flask:
         # Copy the conversation's title in for human-readable indexing — but
         # only if that session actually exists; never auto-create one here
         # (ConversationStore.load() would otherwise spawn an empty session).
+        # 解析定位信息：标题 / prompt 版本 / 聊到第几轮（提交时的消息数）。
         session_title = ""
+        prompt_version_id = None
+        prompt_mode = ""
+        message_count = 0
+        last_message_ts = None
         if _store._path(session_id).exists():
-            session_title = _store.load(session_id).title
+            conv = _store.load(session_id)
+            session_title = conv.title
+            prompt_version_id = conv.prompt_version_id
+            prompt_mode = conv.prompt_mode
+            message_count = len(conv.messages)
+            if conv.messages:
+                last_message_ts = conv.messages[-1].ts
         try:
             record = _feedback_store.submit(
                 session_id=session_id,
@@ -1375,6 +1386,10 @@ def create_app() -> Flask:
                 other=data.get("other"),
                 client_id=_client_id(),
                 session_title=session_title,
+                prompt_version_id=prompt_version_id,
+                prompt_mode=prompt_mode,
+                message_count=message_count,
+                last_message_ts=last_message_ts,
             )
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
@@ -1403,8 +1418,11 @@ def create_app() -> Flask:
         if not session_id:
             return jsonify({"ok": False, "error": "缺少 session_id"}), 400
         session_title = ""
+        prompt_version_id = None
         if _store._path(session_id).exists():
-            session_title = _store.load(session_id).title
+            conv = _store.load(session_id)
+            session_title = conv.title
+            prompt_version_id = conv.prompt_version_id
         try:
             entry = _msg_feedback_store.set(
                 session_id=session_id,
@@ -1414,6 +1432,8 @@ def create_app() -> Flask:
                 user_id=_client_id(),
                 text=data.get("text") or "",
                 session_title=session_title,
+                dimension=data.get("dimension") or "",
+                prompt_version_id=prompt_version_id,
             )
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400

@@ -35,7 +35,8 @@ DIMENSIONS: list[tuple[str, str]] = [
 ]
 DIMENSION_KEYS = {k for k, _ in DIMENSIONS}
 
-RATINGS = {"good", "bad"}
+# "skip" = 这段对话没涉及该维度，跳过不评。免填理由，统计里单列。
+RATINGS = {"good", "bad", "skip"}
 
 REASON_MAX = 1000
 OTHER_MAX = 4000
@@ -48,9 +49,14 @@ class FeedbackRecord:
     # Human-readable label of the evaluated session, copied in at submit time
     # so a questionnaire can be traced back to its conversation without a join.
     session_title: str = ""
+    # 定位字段：这份 reward 是针对哪个 prompt 版本、聊到第几轮给的。
+    prompt_version_id: str | None = None
+    prompt_mode: str = ""           # "shared" | "private"
+    message_count: int = 0          # 提交时该会话的消息条数（定位「聊到哪了」）
+    last_message_ts: float | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    # {dim_key: {"rating": "good"|"bad", "reason": str}}
+    # {dim_key: {"rating": "good"|"bad"|"skip", "reason": str}}
     dimensions: dict = field(default_factory=dict)
     other: str = ""
 
@@ -59,6 +65,10 @@ class FeedbackRecord:
             "session_id": self.session_id,
             "client_id": self.client_id,
             "session_title": self.session_title,
+            "prompt_version_id": self.prompt_version_id,
+            "prompt_mode": self.prompt_mode,
+            "message_count": self.message_count,
+            "last_message_ts": self.last_message_ts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "dimensions": self.dimensions,
@@ -71,6 +81,10 @@ class FeedbackRecord:
             session_id=d["session_id"],
             client_id=d.get("client_id"),
             session_title=d.get("session_title", "") or "",
+            prompt_version_id=d.get("prompt_version_id"),
+            prompt_mode=d.get("prompt_mode", "") or "",
+            message_count=d.get("message_count", 0) or 0,
+            last_message_ts=d.get("last_message_ts"),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", d.get("created_at", time.time())),
             dimensions=d.get("dimensions", {}) or {},
@@ -94,7 +108,7 @@ def validate_submission(dimensions, other) -> tuple[dict, str]:
             raise ValueError(f"维度「{label}」缺少评价。")
         rating = entry.get("rating")
         if rating not in RATINGS:
-            raise ValueError(f"维度「{label}」的评价必须是 好 或 不好。")
+            raise ValueError(f"维度「{label}」的评价必须是 好 / 不好 / 跳过。")
         reason = entry.get("reason") or ""
         if not isinstance(reason, str):
             raise ValueError(f"维度「{label}」的原因必须是文本。")
@@ -142,6 +156,10 @@ class FeedbackStore:
         other: str,
         client_id: str | None,
         session_title: str = "",
+        prompt_version_id: str | None = None,
+        prompt_mode: str = "",
+        message_count: int = 0,
+        last_message_ts: float | None = None,
     ) -> FeedbackRecord:
         """Validate + persist. On resubmit, keep the original created_at and
         bump updated_at."""
@@ -152,6 +170,10 @@ class FeedbackStore:
             session_id=session_id,
             client_id=client_id,
             session_title=(session_title or (existing.session_title if existing else "")),
+            prompt_version_id=prompt_version_id,
+            prompt_mode=prompt_mode,
+            message_count=message_count,
+            last_message_ts=last_message_ts,
             created_at=existing.created_at if existing else now,
             updated_at=now,
             dimensions=cleaned_dims,
@@ -181,7 +203,7 @@ class FeedbackStore:
         records = self.list_records(client_id)
         dims: list[dict] = []
         for key, label in DIMENSIONS:
-            good = bad = 0
+            good = bad = skip = 0
             reasons: list[dict] = []
             for rec in records:
                 entry = rec.dimensions.get(key)
@@ -192,6 +214,9 @@ class FeedbackStore:
                     good += 1
                 elif rating == "bad":
                     bad += 1
+                elif rating == "skip":
+                    skip += 1
+                    continue
                 else:
                     continue
                 reason = (entry.get("reason") or "").strip()
@@ -202,6 +227,8 @@ class FeedbackStore:
                             "reason": reason,
                             "session_id": rec.session_id,
                             "session_title": rec.session_title,
+                            "prompt_version_id": rec.prompt_version_id,
+                            "message_count": rec.message_count,
                             "created_at": rec.updated_at,
                         }
                     )
@@ -211,7 +238,8 @@ class FeedbackStore:
                     "label": label,
                     "good": good,
                     "bad": bad,
-                    "total": good + bad,
+                    "skip": skip,
+                    "total": good + bad,   # 比例分母不含跳过
                     "reasons": reasons,
                 }
             )
@@ -220,6 +248,8 @@ class FeedbackStore:
                 "other": rec.other.strip(),
                 "session_id": rec.session_id,
                 "session_title": rec.session_title,
+                "prompt_version_id": rec.prompt_version_id,
+                "message_count": rec.message_count,
                 "created_at": rec.updated_at,
             }
             for rec in records
@@ -245,6 +275,8 @@ class FeedbackStore:
 MSG_RATINGS = {"up", "down"}
 MSG_REASON_MAX = 1000
 MSG_TEXT_MAX = 300
+# 逐条赞踩可选打的维度标签：九维度之一 或 "other"，也可留空。
+MSG_DIMENSIONS = DIMENSION_KEYS | {"other"}
 
 
 class MessageFeedbackStore:
@@ -279,11 +311,13 @@ class MessageFeedbackStore:
         user_id: str | None = None,
         text: str = "",
         session_title: str = "",
+        dimension: str = "",
+        prompt_version_id: str | None = None,
     ) -> dict | None:
         """Upsert one message's rating. An empty/None rating clears it.
 
         Returns the stored entry, or None when cleared. Raises ValueError on a
-        malformed rating."""
+        malformed rating/dimension."""
         try:
             ts = float(message_ts)
         except (TypeError, ValueError):
@@ -298,13 +332,18 @@ class MessageFeedbackStore:
             raise ValueError("rating 必须是 up 或 down。")
         if not isinstance(reason, str):
             raise ValueError("reason 必须是文本。")
+        dimension = (dimension or "").strip()
+        if dimension and dimension not in MSG_DIMENSIONS:
+            raise ValueError(f"未知维度标签：{dimension}")
         entry = {
             "ts": ts,
             "rating": rating,
             "reason": reason.strip()[:MSG_REASON_MAX],
+            "dimension": dimension,
             "user_id": user_id,
             "text": (text or "").strip()[:MSG_TEXT_MAX],
             "session_title": session_title,
+            "prompt_version_id": prompt_version_id,
             "updated_at": time.time(),
         }
         data[key] = entry
@@ -317,9 +356,11 @@ class MessageFeedbackStore:
         return list(self.load(session_id).values())
 
     def summary(self) -> dict:
-        """Aggregate across all sessions: up/down counts + the full item list
-        (each with its message excerpt + reason), newest first."""
+        """Aggregate across all sessions: up/down counts (overall + per tagged
+        dimension) + the full item list (excerpt + reason + dimension)."""
         up = down = 0
+        # 按维度统计：键含九维度 + "other" + "" (未打标)
+        by_dim: dict[str, dict] = {}
         items: list[dict] = []
         for p in self.root.glob("*.json"):
             try:
@@ -337,22 +378,43 @@ class MessageFeedbackStore:
                     down += 1
                 else:
                     continue
+                dim = (entry.get("dimension") or "").strip()
+                slot = by_dim.setdefault(dim, {"up": 0, "down": 0})
+                slot[rating] += 1
                 items.append(
                     {
                         "rating": rating,
                         "reason": (entry.get("reason") or "").strip(),
+                        "dimension": dim,
                         "text": entry.get("text") or "",
                         "session_id": sid,
                         "session_title": entry.get("session_title") or "",
                         "user_id": entry.get("user_id"),
+                        "prompt_version_id": entry.get("prompt_version_id"),
                         "ts": entry.get("ts"),
                         "updated_at": entry.get("updated_at", 0),
                     }
                 )
         items.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
+        # 维度分解：九维度 + 其他 + 未打标，只列出有数据的。
+        label_map = dict(DIMENSIONS)
+        label_map["other"] = "其他"
+        label_map[""] = "（未打标）"
+        dim_order = [k for k, _ in DIMENSIONS] + ["other", ""]
+        by_dimension = [
+            {
+                "key": k,
+                "label": label_map.get(k, k),
+                "up": by_dim[k]["up"],
+                "down": by_dim[k]["down"],
+            }
+            for k in dim_order
+            if k in by_dim
+        ]
         return {
             "up": up,
             "down": down,
             "total": up + down,
+            "by_dimension": by_dimension,
             "items": items,
         }
