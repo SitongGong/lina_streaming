@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 # (and filled with its default) rather than blowing the whole budget.
 _CONTROLLER_TIMEOUT = 6.0  # total fan-out deadline (seconds)
 _ADVISOR_TIMEOUT = 5.0  # per-advisor timeout (must be < total)
+# Self-facts updates run in a BACKGROUND thread (not the latency-sensitive
+# per-turn path) and regenerate the full facts JSON (up to 800 tokens), which
+# grows as facts accumulate. They need a much more generous deadline than the
+# per-turn advisors — especially on Claude, which is slower per output token
+# than gpt-5-mini-minimal. Override via LINA_SELF_FACTS_TIMEOUT.
+_SELF_FACTS_TIMEOUT = 30.0
 DEFAULT_CONTROLLER_MODEL = "gpt-5-mini"
 
 
@@ -153,7 +159,8 @@ class LinaController:
                     reasoning_effort="minimal",
                     response_format={"type": "json_object"},
                 ),
-                timeout=self._advisor_timeout,
+                # Background task → generous deadline, not the per-turn 5s budget.
+                timeout=float(os.environ.get("LINA_SELF_FACTS_TIMEOUT") or _SELF_FACTS_TIMEOUT),
             )
             raw = (resp.choices[0].message.content or "").strip()
             data = _parse_json_object(raw)
