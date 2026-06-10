@@ -1800,14 +1800,17 @@ async function refreshStatus() {
     $('status-dot').classList.toggle('ready', !!s.ready);
     $('status-dot').title = s.ready ? '已连接' : (s.logged_in ? '已登录·待连接 Key' : '未登录');
     // 当前全局默认提示词版本（与某个已保存版本完全一致时显示其名字，否则「自定义」）。
+    state.defaultPrompt = s.default_prompt || null;
     const chip = $('default-prompt-chip');
     if (chip) {
-      const dp = s.default_prompt;
+      const dp = state.defaultPrompt;
       chip.textContent = '默认: ' + (dp && dp.name ? dp.name : '自定义');
       chip.title = dp && dp.name
         ? ('当前全局默认提示词版本：' + dp.name)
         : '当前全局默认提示词为自定义（不完全匹配任何已保存版本）';
     }
+    // 会话上的提示词选择器也据此刷新「共享全局」当前指向的版本名。
+    if (typeof populatePromptSelect === 'function') populatePromptSelect();
     // 主动发言 / 续说节奏参数由后端下发（可被环境变量调），覆盖前端默认。
     if (s.proactive_pacing) {
       state.pacing = Object.assign({}, state.pacing, s.proactive_pacing);
@@ -1881,7 +1884,9 @@ function populatePromptSelect() {
   sel.innerHTML = '';
   const cur = document.createElement('option');
   cur.value = '';
-  cur.textContent = '当前编辑中（共享全局）';
+  // 显示「共享全局」当前指向哪个已保存版本（不匹配任何版本时为「自定义」）。
+  const dp = state.defaultPrompt;
+  cur.textContent = '当前编辑中（共享全局 = ' + (dp && dp.name ? dp.name : '自定义') + '）';
   sel.appendChild(cur);
   for (const v of (state.versions || [])) {
     const opt = document.createElement('option');
