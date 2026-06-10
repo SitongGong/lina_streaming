@@ -1384,6 +1384,21 @@
   }
   .msg-fb.rated .fb-reason-inline { display: inline-block; }
   .fb-reason-inline:focus { border-color: var(--accent-soft); }
+  .fb-dim {
+    display: none;
+    border: 1px solid var(--line); background: rgba(255,253,247,0.95);
+    border-radius: 5px; padding: 2px 6px; font-size: 11.5px;
+    font-family: "Noto Serif SC", serif; color: var(--ink-soft); outline: none;
+  }
+  .msg-fb.rated .fb-dim { display: inline-block; }
+  .fb-dim:focus { border-color: var(--accent-soft); }
+  /* composer 上的自动问卷开关 */
+  .auto-survey-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11.5px; color: var(--ink-faint); cursor: pointer; user-select: none;
+    margin-right: 10px;
+  }
+  .auto-survey-toggle input { cursor: pointer; margin: 0; }
 
   /* ---- 汇总页：分区标题 + 逐条反馈条目里的消息摘录 ---- */
   .fb-section-title {
@@ -1394,6 +1409,25 @@
   .fb-section-title:first-child { margin-top: 0; }
   .fb-sum-reasons .reason-text .msg-excerpt { color: var(--ink-soft); }
   .fb-sum-reasons .reason-text .msg-reason { color: var(--accent); margin-left: 4px; }
+  /* 维度标签（汇总页 + 逐条条目）+ 维度赞踩分解条 */
+  .dim-tag {
+    display: inline-block; font-family: "JetBrains Mono", monospace; font-size: 10px;
+    color: var(--gold); border: 1px solid rgba(176,132,56,0.4); border-radius: 3px;
+    padding: 0 4px; margin-right: 4px;
+  }
+  .fb-dim-break {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    padding: 8px 14px; border-top: 1px solid rgba(0,0,0,0.04);
+    font-family: "JetBrains Mono", monospace; font-size: 11.5px;
+  }
+  .fb-dim-break .dim-stat { display: inline-flex; align-items: center; gap: 4px; }
+  .fb-dim-break .good { color: #2d6a3d; }
+  .fb-dim-break .bad { color: var(--accent); }
+  .fb-sum-head .h-counts .skip { color: var(--ink-faint); }
+  /* 问卷表单里「跳过」状态的行淡化 */
+  .toggle-btn.skip.active { background: var(--ink-faint); color: var(--parchment); border-color: var(--ink-faint); }
+  .fb-row.skipped { opacity: 0.6; }
+  .fb-row.skipped .fb-reason { display: none; }
 </style>
 </head>
 <body>
@@ -1519,6 +1553,9 @@
       <div class="composer-hint">
         <span>提示：莉娜对古代语、香草、戏剧、遗物都很有兴趣。</span>
         <span class="grow"></span>
+        <label class="auto-survey-toggle" title="每 50 条回复自动弹出评测问卷">
+          <input type="checkbox" id="auto-survey-chk"> 每50轮自动问卷
+        </label>
         <span class="voice-status" id="voice-status">语音：未启用</span>
       </div>
     </div>
@@ -1973,12 +2010,15 @@ async function restoreMsgFeedback() {
     items = data.items || [];
   } catch (e) { return; }
   if (!items.length) return;
+  await ensureFeedbackSchema().catch(() => {});  // 确保维度下拉选项已就绪
   const byTs = new Map(items.map(it => [it.ts, it]));
   document.querySelectorAll('#messages .msg.assistant').forEach(wrap => {
     const it = byTs.get(wrap.__ts);
     if (!it) return;
     wrap.__fbRating = (it.rating === 'up' || it.rating === 'down') ? it.rating : null;
+    wrap.__fbDim = it.dimension || '';
     if (wrap.__fbReasonEl) wrap.__fbReasonEl.value = it.reason || '';
+    if (wrap.__fbDimFill) wrap.__fbDimFill();  // 重新填充并选中已存维度
     if (wrap.__fbReflect) wrap.__fbReflect();
   });
 }
@@ -2146,42 +2186,59 @@ function appendMessage(role, content, opts = {}) {
 }
 
 // 给一条助手消息挂上 👍/👎 + 可选理由输入。模仿 quote-btn 范式（点击时实时取文本）。
+// 逐条赞踩的维度下拉选项（L1-L9 + 其他）。从 /api/feedback/schema 缓存来。
+function msgDimOptions(selected) {
+  let html = '<option value="">维度（可选）</option>';
+  for (const d of (state.feedbackDims || [])) {
+    html += `<option value="${d.key}"${d.key === selected ? ' selected' : ''}>${escapeHtml(d.key + ' ' + d.label)}</option>`;
+  }
+  html += `<option value="other"${selected === 'other' ? ' selected' : ''}>其他</option>`;
+  return html;
+}
+
 function attachThumbs(wrap, contentEl) {
   const bar = document.createElement('div');
   bar.className = 'msg-fb';
   bar.innerHTML = `
     <button class="fb-thumb up" title="赞这条回复">👍</button>
     <button class="fb-thumb down" title="踩这条回复">👎</button>
+    <select class="fb-dim" title="这条主要关于哪个维度（可选，帮助分析）"></select>
     <input class="fb-reason-inline" type="text" placeholder="理由（可选）" maxlength="1000">
   `;
   const upBtn = bar.querySelector('.up');
   const downBtn = bar.querySelector('.down');
   const reasonEl = bar.querySelector('.fb-reason-inline');
+  const dimEl = bar.querySelector('.fb-dim');
   wrap.__fbRating = null;
+  wrap.__fbDim = '';
+
+  const fillDim = () => { dimEl.innerHTML = msgDimOptions(wrap.__fbDim || ''); };
+  if (state.feedbackDims) fillDim(); else ensureFeedbackSchema().then(fillDim).catch(() => {});
 
   function reflect() {
     upBtn.classList.toggle('active', wrap.__fbRating === 'up');
     downBtn.classList.toggle('active', wrap.__fbRating === 'down');
-    bar.classList.toggle('rated', !!wrap.__fbRating);  // 选过才显示理由框
+    bar.classList.toggle('rated', !!wrap.__fbRating);  // 选过才显示维度/理由
   }
   function choose(rating) {
     wrap.__fbRating = (wrap.__fbRating === rating) ? null : rating;  // 再点同一个 = 取消
     reflect();
-    saveMsgFeedback(wrap, contentEl, reasonEl.value);
+    saveMsgFeedback(wrap, contentEl);
   }
   upBtn.addEventListener('click', () => choose('up'));
   downBtn.addEventListener('click', () => choose('down'));
-  // 理由：失焦或回车时保存（仅在已选了 rating 时才有意义，但空 rating 也允许带理由暂存于 UI）。
+  dimEl.addEventListener('change', () => { wrap.__fbDim = dimEl.value; if (wrap.__fbRating) saveMsgFeedback(wrap, contentEl); });
   reasonEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); reasonEl.blur(); } });
-  reasonEl.addEventListener('blur', () => { if (wrap.__fbRating) saveMsgFeedback(wrap, contentEl, reasonEl.value); });
+  reasonEl.addEventListener('blur', () => { if (wrap.__fbRating) saveMsgFeedback(wrap, contentEl); });
 
   wrap.__fbReflect = reflect;        // 供回显历史时调用
   wrap.__fbReasonEl = reasonEl;
+  wrap.__fbDimFill = fillDim;
   wrap.querySelector('.bubble').appendChild(bar);
 }
 
 // 保存某条消息的点赞/点踩到后端（按消息 ts 作 key）。
-async function saveMsgFeedback(wrap, contentEl, reason) {
+async function saveMsgFeedback(wrap, contentEl) {
   const ts = wrap.__ts;
   if (ts == null || !state.currentSession) return;  // 还没拿到 ts（极少见）就不存
   try {
@@ -2191,7 +2248,8 @@ async function saveMsgFeedback(wrap, contentEl, reason) {
         session_id: state.currentSession,
         message_ts: ts,
         rating: wrap.__fbRating || '',
-        reason: reason || '',
+        reason: (wrap.__fbReasonEl ? wrap.__fbReasonEl.value : '') || '',
+        dimension: wrap.__fbDim || '',
         text: (contentEl.textContent || '').trim(),
       }),
     });
@@ -2332,6 +2390,7 @@ async function send() {
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
     await loadSessions();
+    maybeAutoSurvey();   // 每 50 轮自动弹问卷
   } catch (e) {
     typingEl.querySelector('.content').textContent = '（出错了：' + e.message + '）';
     typingEl.querySelector('.content').style.color = 'var(--accent)';
@@ -2579,18 +2638,38 @@ function closeFeedbackModal() {
   $('feedback-modal').classList.remove('active');
 }
 
+// ---- 每 50 轮（用户消息）自动弹问卷，可在 composer 关掉 ----
+function autoSurveyEnabled() {
+  const v = localStorage.getItem('lina_auto_survey');
+  return v === null ? true : v === '1';   // 默认开
+}
+function maybeAutoSurvey() {
+  if (!autoSurveyEnabled()) return;
+  if (!state.currentSession) return;
+  if ($('feedback-modal').classList.contains('active')) return;
+  // 以用户消息条数为「轮数」（system_trigger 占位不渲染，不计入）。
+  const n = document.querySelectorAll('#messages .msg.user').length;
+  if (n > 0 && n % 50 === 0 && state.__lastAutoSurveyN !== n) {
+    state.__lastAutoSurveyN = n;
+    toast('已聊 ' + n + ' 轮，弹出评测问卷（可在下方关掉自动弹出）', 3000);
+    openFeedbackModal();
+  }
+}
+
 function renderFeedbackForm() {
   const dims = state.feedbackDims || [];
   const draft = state.feedbackDraft;
   const rows = dims.map(d => {
     const cur = draft[d.key] || { rating: null, reason: '' };
     const isBad = cur.rating === 'bad';
+    const isSkip = cur.rating === 'skip';
     return `
-      <div class="fb-row" data-key="${d.key}">
+      <div class="fb-row${isSkip ? ' skipped' : ''}" data-key="${d.key}">
         <div class="fb-label"><span class="fb-key">${d.key}</span>${escapeHtml(d.label)}</div>
         <div class="fb-toggle">
           <button type="button" class="toggle-btn good${cur.rating === 'good' ? ' active' : ''}" data-rating="good">👍 好</button>
           <button type="button" class="toggle-btn bad${cur.rating === 'bad' ? ' active' : ''}" data-rating="bad">👎 不好</button>
+          <button type="button" class="toggle-btn skip${isSkip ? ' active' : ''}" data-rating="skip" title="这段对话没涉及该维度">跳过</button>
         </div>
         <textarea class="fb-reason" data-key="${d.key}"
           placeholder="${isBad ? '请说明哪里不好（必填）' : '原因（可选）'}">${escapeHtml(cur.reason || '')}</textarea>
@@ -2612,6 +2691,7 @@ function renderFeedbackForm() {
       const rating = btn.dataset.rating;
       state.feedbackDraft[key].rating = rating;
       row.querySelectorAll('.toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
+      row.classList.toggle('skipped', rating === 'skip');
       const ta = row.querySelector('.fb-reason');
       ta.placeholder = rating === 'bad' ? '请说明哪里不好（必填）' : '原因（可选）';
       if (rating !== 'bad') ta.classList.remove('required-missing');
@@ -2634,8 +2714,8 @@ async function submitFeedback() {
   // Validate: every dimension rated; "bad" needs a reason.
   for (const d of dims) {
     const cur = draft[d.key] || {};
-    if (cur.rating !== 'good' && cur.rating !== 'bad') {
-      $('feedback-form-hint').textContent = `维度「${d.label}」还没选择好 / 不好。`;
+    if (cur.rating !== 'good' && cur.rating !== 'bad' && cur.rating !== 'skip') {
+      $('feedback-form-hint').textContent = `维度「${d.label}」还没选择（好 / 不好 / 跳过）。`;
       toast(`「${d.label}」还没评价。`, 3000);
       return;
     }
@@ -2686,6 +2766,13 @@ async function loadFeedbackSummary() {
 function _fbSrcLabel(o) {
   return (o.session_title && o.session_title.trim()) ? o.session_title.trim() : o.session_id;
 }
+// 定位标签：会话 + prompt 版本 + 第几轮（用于「这条 reward 是给哪里的」）。
+function _fbLocLabel(o) {
+  let s = _fbSrcLabel(o);
+  if (o.prompt_version_id) s += ' · ' + String(o.prompt_version_id).slice(0, 12);
+  if (o.message_count) s += ' · 第' + o.message_count + '条';
+  return s;
+}
 
 function renderFeedbackSummary(qData, mData) {
   qData = qData || { submission_count: 0, dimensions: [], others: [] };
@@ -2699,11 +2786,16 @@ function renderFeedbackSummary(qData, mData) {
     <div class="reason-item">
       <span class="tag ${it.rating === 'up' ? 'good' : 'bad'}">${it.rating === 'up' ? '👍' : '👎'}</span>
       <span class="reason-text">
+        ${it.dimension ? `<span class="dim-tag">${escapeHtml(it.dimension === 'other' ? '其他' : it.dimension)}</span>` : ''}
         <span class="msg-excerpt">${escapeHtml(it.text || '（无正文）')}</span>
         ${it.reason ? `<span class="msg-reason">— ${escapeHtml(it.reason)}</span>` : ''}
       </span>
-      <span class="reason-src" title="${escapeHtml(it.session_id)}">${escapeHtml(_fbSrcLabel(it))}</span>
+      <span class="reason-src" title="${escapeHtml(it.session_id)}">${escapeHtml(_fbLocLabel(it))}</span>
     </div>`).join('');
+  // 按维度拆分的赞踩计数（本次新增）
+  const dimBreak = (mData.by_dimension || []).map(b => `
+    <span class="dim-stat"><span class="dim-tag">${escapeHtml(b.label)}</span>
+      <span class="good">👍${b.up}</span> <span class="bad">👎${b.down}</span></span>`).join('');
   const msgHtml = `
     <div class="fb-sum-row">
       <div class="fb-sum-head">
@@ -2714,6 +2806,7 @@ function renderFeedbackSummary(qData, mData) {
         <div class="seg-good" style="width:${mData.total ? mData.up / mData.total * 100 : 0}%"></div>
         <div class="seg-bad" style="width:${mData.total ? mData.down / mData.total * 100 : 0}%"></div>
       </div>
+      ${dimBreak ? `<div class="fb-dim-break">${dimBreak}</div>` : ''}
       ${mItems ? `<div class="fb-sum-reasons">${mItems}</div>`
                : '<div class="fb-sum-empty">还没有逐条反馈。对话里点每条回复下的 👍/👎。</div>'}
     </div>`;
@@ -2731,14 +2824,14 @@ function renderFeedbackSummary(qData, mData) {
         <div class="reason-item">
           <span class="tag ${r.rating}">${r.rating === 'good' ? '好' : '不好'}</span>
           <span class="reason-text">${escapeHtml(r.reason)}</span>
-          <span class="reason-src" title="${escapeHtml(r.session_id)}">${escapeHtml(_fbSrcLabel(r))}</span>
+          <span class="reason-src" title="${escapeHtml(r.session_id)}">${escapeHtml(_fbLocLabel(r))}</span>
         </div>`).join('');
       return `
         <div class="fb-sum-row">
           <div class="fb-sum-head">
             <span class="h-key">${d.key}</span>
             <span class="h-label">${escapeHtml(d.label)}</span>
-            <span class="h-counts"><span class="good">好 ${d.good}</span> · <span class="bad">不好 ${d.bad}</span></span>
+            <span class="h-counts"><span class="good">好 ${d.good}</span> · <span class="bad">不好 ${d.bad}</span>${d.skip ? ` · <span class="skip">跳过 ${d.skip}</span>` : ''}</span>
           </div>
           <div class="fb-bar">
             <div class="seg-good" style="width:${goodPct}%"></div>
@@ -2749,7 +2842,7 @@ function renderFeedbackSummary(qData, mData) {
         </div>`;
     }).join('');
     const others = (qData.others || []).map(o => `
-      <div class="fb-other-item">${escapeHtml(o.other)}<span class="reason-src" title="${escapeHtml(o.session_id)}">来自：${escapeHtml(_fbSrcLabel(o))}</span></div>`).join('');
+      <div class="fb-other-item">${escapeHtml(o.other)}<span class="reason-src" title="${escapeHtml(o.session_id)}">来自：${escapeHtml(_fbLocLabel(o))}</span></div>`).join('');
     qHtml = dimsHtml + (others ? `<div class="fb-others-block"><h4>其他问题反馈</h4>${others}</div>` : '');
   }
 
@@ -3348,6 +3441,16 @@ document.addEventListener('keydown', (e) => {
 
 // ---- Evaluation questionnaire bindings ----
 $('evaluation-btn').addEventListener('click', openFeedbackModal);
+// 自动问卷开关：从 localStorage 读初值（默认开），改动即存。
+(function initAutoSurveyToggle() {
+  const chk = $('auto-survey-chk');
+  if (!chk) return;
+  chk.checked = autoSurveyEnabled();
+  chk.addEventListener('change', () => {
+    localStorage.setItem('lina_auto_survey', chk.checked ? '1' : '0');
+    toast(chk.checked ? '已开启每50轮自动问卷' : '已关闭自动问卷', 2000);
+  });
+})();
 $('feedback-modal-close').addEventListener('click', closeFeedbackModal);
 $('feedback-cancel').addEventListener('click', closeFeedbackModal);
 $('feedback-submit').addEventListener('click', submitFeedback);
@@ -3697,6 +3800,7 @@ async function streamVoiceReply(text) {
           renderChunks(ev.retrieved, ev.retrieved_history);
           renderUsage(ev.usage);
           await loadSessions();
+          maybeAutoSurvey();   // 每 50 轮自动弹问卷
         } else if (ev.type === 'error') {
           throw new Error(ev.error);
         }
