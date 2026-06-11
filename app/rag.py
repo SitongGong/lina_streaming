@@ -1,10 +1,13 @@
 """Lightweight RAG over the character's static documents.
 
 Design choices:
-- Core identity files (`person_setup.md`, `world.md`) are always included in
-  the system prompt — they're load-bearing and small enough that retrieval
-  risks dropping the wrong slice.
-- Other files are chunked by markdown sections and retrieved via BM25.
+- Only `person_setup.md` (who she is / origin) is always included in the
+  system prompt — it's the identity bedrock; dropping a slice of it would
+  break character, and it's small and won't grow unbounded.
+- Everything else (world.md, sample_conversations.md, personality.md,
+  hobbies.md, others.md) is chunked by markdown sections and retrieved via
+  BM25, gated per-source by the controller plan. These files are expected to
+  grow over time, so全量塞进 prompt 不划算——controller 按场景挑相关片段。
 - Tokenization uses character bigrams, which works for Chinese without
   pulling in a segmenter (jieba) as a dependency.
 """
@@ -19,8 +22,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-CORE_FILES = ("person_setup.md", "world.md", "sample_conversations.md")
-RAG_FILES = ("personality.md", "hobbies.md", "others.md")
+# 只有身份根基永远全量进 prompt（不检索）。world / sample_conversations 以后会
+# 越来越长，移到检索集，由 controller 按场景挑片段。
+CORE_FILES = ("person_setup.md",)
+RAG_FILES = (
+    "world.md",
+    "sample_conversations.md",
+    "personality.md",
+    "hobbies.md",
+    "others.md",
+)
 
 # 时间衰减半衰期（秒）。一条记忆每过这么久，其检索权重减半。
 # 7 天：本周内的记忆基本保权重，更老的逐步让位给近期记忆。

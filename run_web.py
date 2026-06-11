@@ -13,8 +13,35 @@ Examples:
 """
 
 import argparse
+import logging
+import os
+from pathlib import Path
+
+
+def _load_dotenv() -> None:
+    """把项目根目录 .env 里的键值加载进 os.environ（不覆盖已有的环境变量）。
+    项目没装 python-dotenv，这里自己读，避免新增依赖。controller 的
+    OPENAI_API_KEY 就靠这一步进环境——否则 controller 会退化成只走规则层。"""
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_dotenv()
 
 from app.web import create_app
+
+# 让 controller 决策 trace（logging.INFO）能打到日志里，方便复盘每轮判断。
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
 def main() -> int:

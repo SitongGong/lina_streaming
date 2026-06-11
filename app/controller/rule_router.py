@@ -100,7 +100,75 @@ def _join_hint(*parts: str, limit: int = 24) -> str:
 class LinaRuleRouter:
     """Deterministic regex routing. Returns None if no rule fires."""
 
+    # 规则层场景 → 该注入的场景专属 few-shot 示例库。
+    _SCENE_FEWSHOT = {
+        "user_vent": "comfort",                 # 安抚：先接情绪别说教
+        "modern_action_request": "modern_boundary",  # 现代请求：茫然以对别出戏
+        # 正向回应（报喜）没有专属规则场景（多走 LLM 或 relationship_recall），
+        # 在 LLM 路径里按情绪/语义带出 positive_response（见 controller._merge）。
+        "relationship_recall": "positive_response",  # 回访常含报喜/致谢，给正向示例兜底
+    }
+
     def route(self, ctx: LinaTurnContext) -> LinaPromptPlan | None:
+        plan = self._route(ctx)
+        if plan is None:
+            return None
+        return self._apply_behavior_defaults(ctx, plan)
+
+    @staticmethod
+    def _apply_behavior_defaults(ctx: LinaTurnContext, plan: LinaPromptPlan) -> LinaPromptPlan:
+        """规则层产出的 plan 不走微顾问，需要在这里补上两个行为微调开关：
+        - suppress_trailing_question：默认抑制「句尾强行甩问号」，但 world_immersion
+          这种「追问才是魅力」的兴奋点场景不抑制。
+        - lenient_typos：自由文本场景（用户随手打字）善意理解错别字。
+        告别/续说/空输入这类极短或无用户文本的场景，两者都没意义，保持关闭。
+        """
+        # 告别/续说/空输入：极短、无意义，两个开关都跳过。
+        skip = plan.matched_rule in {
+            "proactive_farewell", "continuation", "empty_input",
+        }
+        if skip:
+            return plan
+        # 句尾抑制**所有场景都开**（含兴奋点、含主动发言）——区别交给 composer：兴奋点仍可
+        # 追问，但限"一次一个问题、别第一段就连珠炮"，而不是整条都不许问。
+        # 主动发言（proactive_engage）尤其要压：它本就该自然起个话头，不该上来甩问号。
+        suppress = True
+        # 用户自由发言的场景才需要容错；主动发言没有用户输入、纯问候/短反应字少，关掉省事。
+        lenient = plan.matched_rule in {
+            "user_vent", "relationship_recall", "self_introspection",
+            "world_immersion", "welcome_back", "modern_action_request",
+        }
+        # few-shot 注入：场景专属示例放最前（优先级高，截断时先保留），
+        # 通用示例（别连问/容错）搭 suppress/lenient 的便车放后面。
+        # _SCENE_FEWSHOT 把规则层场景映射到对应示例库。
+        tags = list(plan.fewshot_tags)
+        scene_tag = LinaRuleRouter._SCENE_FEWSHOT.get(plan.matched_rule)
+        if scene_tag and scene_tag not in tags:
+            tags.insert(0, scene_tag)
+        if suppress and "no_trailing_question" not in tags:
+            tags.append("no_trailing_question")
+        if lenient and "typo_tolerance" not in tags:
+            tags.append("typo_tolerance")
+        # world.md（世界观）：只在涉及她所在世界/身份/古代设定的场景检索，
+        # 其余场景关掉省 token（问候、安抚、现代请求都用不到世界观细节）。
+        use_world = plan.matched_rule in {
+            "world_immersion", "self_introspection", "welcome_back",
+        }
+        # sample_conversations.md（说话范例）：教她"怎么说话"，对大多数真聊天有用；
+        # 现代请求（要茫然以对）和已经极短的场景不需要。
+        use_sample = plan.matched_rule not in {"modern_action_request"}
+        return LinaPromptPlan(
+            **{
+                **plan.to_dict(),
+                "suppress_trailing_question": suppress,
+                "lenient_typos": lenient,
+                "fewshot_tags": tuple(tags),
+                "use_world": use_world,
+                "use_sample_conversations": use_sample,
+            }
+        )
+
+    def _route(self, ctx: LinaTurnContext) -> LinaPromptPlan | None:
         # 主动告别：在 proactive_farewell 路径里走。短、温柔、不挖深历史。
         if ctx.is_farewell:
             return LinaPromptPlan(

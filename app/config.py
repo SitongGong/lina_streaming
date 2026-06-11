@@ -101,7 +101,7 @@ def resolve_proactive_pacing() -> dict:
     return {
         "continue_base_ms": _num("LINA_CONTINUE_BASE_MS", 3000),
         "continue_jitter": _num("LINA_CONTINUE_JITTER", 0.25),
-        "engage_base_ms": _num("LINA_ENGAGE_BASE_MS", 30000),
+        "engage_base_ms": _num("LINA_ENGAGE_BASE_MS", 20000),
         "engage_multiplier": _num("LINA_ENGAGE_MULTIPLIER", 1.4),
         "engage_jitter": _num("LINA_ENGAGE_JITTER", 0.3),
         "max_nudges": int(_num("LINA_MAX_NUDGES", 4)),

@@ -516,7 +516,7 @@ class CharacterEngine:
 
         has_prior_assistant = any(m.role == "assistant" for m in conversation.messages)
         last_meta = conversation.last_assistant_meta() or {}
-        ctx = LinaTurnContext(
+        ctx = LinaTurnContext(      ## 给定是否为主动服务，是否为告别，是否为续写，是否为跨会话记忆，是否为第一轮，是否为信任度，是否为时间间隔
             user_text=user_message,
             history=self._history_pairs_for_controller(conversation),
             session_id=getattr(conversation, "session_id", "") or "",
@@ -529,6 +529,19 @@ class CharacterEngine:
             gap_seconds=self._gap_seconds(conversation),
         )
         plan = self._controller.dispatch_sync(ctx)
+        # 决策可观测：每轮把关键判断打到日志，方便不开断点就复盘 controller 行为。
+        try:
+            import logging
+            logging.getLogger("lina.controller").info(
+                "[plan] rule=%s src=%s | suppress_q=%s lenient_typo=%s allow_seg=%s "
+                "self_facts=%s tone=%s sent=%s chars=%s | u=%r",
+                plan.matched_rule, plan.trace_source,
+                plan.suppress_trailing_question, plan.lenient_typos, plan.allow_segment,
+                plan.use_self_facts, plan.tone_hint, plan.sentences, plan.max_reply_chars,
+                (user_message or "")[:40],
+            )
+        except Exception:
+            pass
         return plan, self._controller.last_trace
 
     @staticmethod
@@ -565,6 +578,7 @@ class CharacterEngine:
         is_first_turn: bool = False,
         quoted_text: str = "",
         self_facts_text: str = "",
+        pending_segments: list[str] | None = None,
     ) -> str:
         sections: list[str] = []
 
@@ -631,6 +645,23 @@ class CharacterEngine:
                 "<用户引用了你之前说过的这句话来回复 — 本轮请明确承接、回应这句，"
                 "不要答非所问>\n"
                 f"{quoted}\n</用户引用>"
+            )
+        # 打断接续判断：上一条莉娜还有没说完的段（park 在 pending_segments），
+        # 用户这时插了新话。不直接作废，而是把没说完的要点作为背景交给主模型，
+        # 由它自己判断——新消息跟这些要点相关就先回应、再自然接着说完；岔开了
+        # 就放下。判断权在主模型，不再机械「插话即丢弃」。
+        pending = [str(p).strip() for p in (pending_segments or []) if str(p or "").strip()]
+        if pending:
+            points = "、".join(pending)
+            sections.append(
+                "<你上一条还没说完的话 — 你之前分段说话时，还剩下面这些要点没说，"
+                "用户这会儿插了新消息进来。请你自己判断：\n"
+                "- 如果用户的新消息跟这些要点还相关（顺着同一个话题、或在追问），"
+                "就先回应用户的新消息，然后自然地把相关的那点接着说完；\n"
+                "- 如果用户明显岔开、换了话题，就放下这些要点，专心回应用户的新消息，"
+                "不要硬把旧话题拽回来。\n"
+                "不管接不接，都不要提到「我刚才还想说」这类元叙述。>\n"
+                f"{points}\n</你上一条还没说完的话>"
             )
         sections.append(f"<用户发言>\n{user_message}\n</用户发言>")
         if not sections[:-1]:  # only user message present, no context blocks
@@ -730,6 +761,14 @@ class CharacterEngine:
                     is_first_turn=is_first_turn,
                     quoted_text=quoted_text,
                     self_facts_text=self_facts_text,
+                    # 上一轮 park 下来、还没说完的段（用户这轮插话）。交给主模型
+                    # 自己判断接不接（见 _build_user_content）。仅 controller 模式下启用，
+                    # 避免无 controller 的简单模式行为变化。
+                    pending_segments=(
+                        list(conversation.pending_segments or [])
+                        if self._controller is not None
+                        else None
+                    ),
                 ),
             }
         ]
@@ -1060,6 +1099,7 @@ class CharacterEngine:
         # 挑一个最值得重提的话头（或 self 级抛莉娜自己的事），驱动这次主动开口。
         topic_hook = ""
         topic_query = ""
+        avoid_hooks: list[str] = []
         if (not is_farewell) and self._controller is not None and self._controller.has_llm:
             try:
                 # 收集本会话之前主动发言已经抛过的话头，传给挑选器去重，
@@ -1081,6 +1121,17 @@ class CharacterEngine:
                 topic_query = (picked or {}).get("query_hint", "") or ""
             except Exception:
                 pass  # 挑话头失败不影响主动发言，退回规则的静态 query_hint
+        # 主动发言可观测：每次把 stage / 计数 / 选中话头 / 已避免话头打到日志，
+        # 方便复盘"为什么又重复了同一个话题"。
+        try:
+            import logging
+            logging.getLogger("lina.controller").info(
+                "[proactive] prior=%s stage=%s farewell=%s hook=%r avoid=%r",
+                prior_proactive, stage, is_farewell, topic_hook,
+                [h[:20] for h in avoid_hooks],
+            )
+        except Exception:
+            pass
 
         # 挑到话头：① 检索 query 优先用它（更聚焦）；② 指令里点名让莉娜去捡它。
         if topic_hook:
