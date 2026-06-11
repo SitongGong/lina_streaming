@@ -1102,6 +1102,32 @@
   .diff-block-empty {
     padding: 14px; font-size: 12.5px; color: var(--ink-faint); font-style: italic; text-align: center;
   }
+  /* ---- inline per-component edit diff (in the 提示词 editor) ---- */
+  .prompt-card .diff-toggle {
+    border: 1px solid var(--line); background: transparent; color: var(--ink-soft);
+    border-radius: 4px; padding: 6px 12px; font-family: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .prompt-card .diff-toggle:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .prompt-card .diff-toggle.active { background: var(--accent); color: var(--parchment); border-color: var(--accent); }
+  .card-diff { display: none; margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .card-diff.show { display: block; }
+  .card-diff-bar {
+    display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+    background: rgba(0,0,0,0.03); border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--ink-soft); font-family: "JetBrains Mono", monospace;
+  }
+  .card-diff-bar select { font-family: inherit; font-size: 12px; }
+  .card-diff-bar .grow { flex: 1; }
+  .card-diff-bar .stat-add { color: #3c8c50; }
+  .card-diff-bar .stat-del { color: var(--accent); }
+  .card-diff .diff-rows { max-height: 340px; overflow: auto; }
+  .card-diff .diff-col-head {
+    display: grid; grid-template-columns: 1fr 1fr;
+    font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--ink-faint);
+  }
+  .card-diff .diff-col-head span { padding: 3px 10px; }
+  .card-diff .diff-col-head span:first-child { border-right: 1px solid rgba(0,0,0,0.06); }
+  .card-diff .diff-empty { padding: 14px; text-align: center; color: var(--ink-faint); font-size: 12.5px; }
   /* ---- 主动发言开关 + 节奏配置（顶栏） ---- */
   .proactive-toggle {
     display: inline-flex; align-items: center; gap: 6px;
@@ -2881,6 +2907,51 @@ function updatePromptsStatus(overrideCount, total) {
   }
 }
 
+// Client-side line diff (LCS) → rows of {a, b, type:'eq'|'del'|'add'}.
+// a = baseline (old), b = current (new). Powers the inline per-component edit
+// diff so you can see what your edits change before applying.
+function lineDiff(aText, bText) {
+  const a = (aText || '').split('\n');
+  const b = (bText || '').split('\n');
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { rows.push({ a: a[i], b: b[j], type: 'eq' }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ a: a[i], b: null, type: 'del' }); i++; }
+    else { rows.push({ a: null, b: b[j], type: 'add' }); j++; }
+  }
+  while (i < n) { rows.push({ a: a[i], b: null, type: 'del' }); i++; }
+  while (j < m) { rows.push({ a: null, b: b[j], type: 'add' }); j++; }
+  return rows;
+}
+
+// Render diff rows into a .diff-rows grid (reuses the existing .diff-cell CSS).
+function renderDiffRowsInto(rowsEl, rows) {
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const cellA = document.createElement('div'); cellA.className = 'diff-cell col-a';
+    const cellB = document.createElement('div'); cellB.className = 'diff-cell col-b';
+    if (r.type === 'eq') {
+      cellA.classList.add('eq'); cellA.textContent = r.a || '';
+      cellB.classList.add('eq'); cellB.textContent = r.b || '';
+    } else if (r.type === 'del') {
+      cellA.classList.add('del'); cellA.textContent = r.a || '';
+      cellB.classList.add('empty'); cellB.textContent = '·';
+    } else {  // add
+      cellA.classList.add('empty'); cellA.textContent = '·';
+      cellB.classList.add('add'); cellB.textContent = r.b || '';
+    }
+    frag.appendChild(cellA); frag.appendChild(cellB);
+  }
+  rowsEl.innerHTML = '';
+  rowsEl.appendChild(frag);
+}
+
 function renderPromptsList(components) {
   const root = $('prompts-list');
   root.innerHTML = '';
@@ -2899,8 +2970,22 @@ function renderPromptsList(components) {
       <textarea spellcheck="false"></textarea>
       <div class="prompt-card-foot">
         <span class="dirty"></span>
+        <button class="diff-toggle" title="对比当前内容与基线，查看改动">查看改动</button>
         <button class="reset" title="清除覆盖，恢复仓库默认">重置</button>
         <button class="apply primary" disabled>应用</button>
+      </div>
+      <div class="card-diff">
+        <div class="card-diff-bar">
+          <span>对比基线</span>
+          <select class="diff-base">
+            <option value="default">仓库默认</option>
+            <option value="applied">已应用</option>
+          </select>
+          <span class="grow"></span>
+          <span class="diff-stat"></span>
+        </div>
+        <div class="diff-col-head"><span>基线</span><span>当前</span></div>
+        <div class="diff-rows"></div>
       </div>
     `;
     card.querySelector('.label').textContent = c.label;
@@ -2914,11 +2999,44 @@ function renderPromptsList(components) {
     ta.dataset.serverValue = c.current;
     ta.dataset.defaultValue = c.default;
 
+    // ---- inline edit diff ----
+    const diffToggle = card.querySelector('.diff-toggle');
+    const diffPanel = card.querySelector('.card-diff');
+    const diffBaseSel = card.querySelector('.diff-base');
+    const diffRowsEl = card.querySelector('.card-diff .diff-rows');
+    const diffColHead = card.querySelector('.diff-col-head');
+    const diffStat = card.querySelector('.diff-stat');
+    function renderCardDiff() {
+      if (!diffPanel.classList.contains('show')) return;
+      const baseline = diffBaseSel.value === 'applied' ? ta.dataset.serverValue : ta.dataset.defaultValue;
+      const rows = lineDiff(baseline, ta.value);
+      const adds = rows.reduce((n, r) => n + (r.type === 'add'), 0);
+      const dels = rows.reduce((n, r) => n + (r.type === 'del'), 0);
+      if (!adds && !dels) {
+        diffRowsEl.innerHTML = '';
+        diffColHead.style.display = 'none';
+        diffStat.textContent = '与基线一致，无改动';
+      } else {
+        diffColHead.style.display = '';
+        renderDiffRowsInto(diffRowsEl, rows);
+        diffStat.innerHTML = `<span class="stat-add">+${adds}</span> <span class="stat-del">−${dels}</span>`;
+      }
+    }
+    diffToggle.addEventListener('click', () => {
+      const show = !diffPanel.classList.contains('show');
+      diffPanel.classList.toggle('show', show);
+      diffToggle.classList.toggle('active', show);
+      diffToggle.textContent = show ? '隐藏改动' : '查看改动';
+      renderCardDiff();
+    });
+    diffBaseSel.addEventListener('change', renderCardDiff);
+
     const updateDirty = () => {
       const isDirty = ta.value !== ta.dataset.serverValue;
       apply.disabled = !isDirty;
       dirty.textContent = isDirty ? '· 未应用' : '';
       dirty.classList.toggle('show', isDirty);
+      renderCardDiff();  // keep the inline diff live while open
     };
     ta.addEventListener('input', updateDirty);
 
