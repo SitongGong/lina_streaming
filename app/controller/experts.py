@@ -557,6 +557,58 @@ def build_lina_advisors(
             ),
             timeout=timeout,
         ),
+        "suppress_trailing_question": BoolAdvisor(
+            client,
+            model=model,
+            name="suppress_trailing_question",
+            field_name="suppress_trailing_question",
+            target_desc=(
+                "本轮是否**抑制「句尾强行甩问号」**。莉娜人设里追问偏多，容易每条都用问句收尾、"
+                "甚至连珠炮追问，显得像审问、很假。开启后让她可以用陈述/附和/分享接住话，不必每条都提问。"
+            ),
+            decision_rules=(
+                "- 默认 true：大多数闲聊、安抚、自我介绍、关系回访都该抑制，避免机械提问。\n"
+                "- 用户明显在邀请她展开好奇、聊她的兴奋点（古代语/遗物/戏剧/香草），"
+                "适度追问是她的魅力 → false（不抑制）。\n"
+                "- 用户低落/需要安抚 → true（这时连问会显得不走心）。"
+            ),
+            default=True,
+            timeout=timeout,
+        ),
+        "lenient_typos": BoolAdvisor(
+            client,
+            model=model,
+            name="lenient_typos",
+            field_name="lenient_typos",
+            target_desc=(
+                "本轮是否**善意理解用户的错别字/笔误**。用户随手打字常有错别字、漏字、拼音、同音字、"
+                "顺序颠倒。开启后让莉娜按最合理的意思接住，不揪着错字反复追问纠错、不把笔误当没听过的怪词。"
+            ),
+            decision_rules=(
+                "- **默认 true**：宁可善意理解。容错对通顺的句子也无害。\n"
+                "- 用户输入里疑似有错别字/漏字/拼音/明显手滑、但意思能猜出来 → true。\n"
+                "- 只有当某个生僻词**明显是真·古代概念、值得她好奇追问**（而非手滑）时 → false。"
+            ),
+            default=True,
+            timeout=timeout,
+        ),
+        "user_positive": BoolAdvisor(
+            client,
+            model=model,
+            name="user_positive",
+            field_name="user_positive",
+            target_desc=(
+                "用户这轮是否在**报喜 / 表达好消息或好转**（如'好一些了''解决了''升职了''顺利多了'"
+                "'谢谢你管用'）。开启后让莉娜先替对方高兴、顺着接住，别浇冷水、别阴郁追问。"
+            ),
+            decision_rules=(
+                "- 用户在说事情变好、报喜讯、表达轻松/感激 → true。\n"
+                "- 用户在发泄/低落/陈述坏消息 → false。\n"
+                "- 中性闲聊、提问、现代请求 → false。"
+            ),
+            default=False,
+            timeout=timeout,
+        ),
         "allow_doubt_wrap": BoolAdvisor(
             client,
             model=model,

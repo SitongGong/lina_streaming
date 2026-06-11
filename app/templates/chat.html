@@ -1498,7 +1498,7 @@
     <span>主动发言</span>
   </label>
   <span class="proactive-config" id="proactive-config" title="首次间隔=第一次主动开口前等多久（之后每次按退避逐渐拉长，且带随机抖动）；上限=连续未回应到第几次时改为告别并停止。">
-    首次<input type="number" id="proactive-interval" min="1" max="60" step="1">分钟·共<input type="number" id="proactive-max-nudges" min="1" max="20" step="1">次后告别
+    首次<input type="number" id="proactive-interval" min="5" max="600" step="1">秒·共<input type="number" id="proactive-max-nudges" min="1" max="20" step="1">次后告别
   </span>
   <div class="grow"></div>
   <span class="prompt-version-chip" id="default-prompt-chip" title="当前全局默认提示词版本（共享会话使用）">默认: —</span>
@@ -1724,7 +1724,7 @@ let state = {
   sending: false,
   // 主动发言 / 续说
   proactiveEnabled: true,
-  proactiveIntervalMin: 3,   // 首次主动开口前等多少分钟（驱动退避基准）
+  proactiveIntervalSec: 20,  // 首次主动开口前等多少秒（驱动退避基准）
   proactiveMaxNudges: 4,     // 4 级：最近话题→更早话题→自己经历→告别
   proactiveCount: 0,         // 上一次用户互动以来已主动发言的次数
   lastActivity: Date.now(),
@@ -1848,8 +1848,8 @@ async function refreshStatus() {
         const el = $('proactive-max-nudges'); if (el) el.value = s.proactive_pacing.max_nudges;
       }
     }
-    // 用户在 UI 设的"首次 N 分钟"优先级最高，覆盖后端默认的 engage_base_ms。
-    state.pacing.engage_base_ms = state.proactiveIntervalMin * 60 * 1000;
+    // 用户在 UI 设的"首次 N 秒"优先级最高，覆盖后端默认的 engage_base_ms。
+    state.pacing.engage_base_ms = state.proactiveIntervalSec * 1000;
   } catch (e) {}
 }
 
@@ -3982,12 +3982,12 @@ function loadProactivePref() {
   const v = localStorage.getItem('lina_proactive');
   state.proactiveEnabled = v !== 'off';   // 默认开启
   $('proactive-checkbox').checked = state.proactiveEnabled;
-  state.proactiveIntervalMin = clampInt(localStorage.getItem('lina_proactive_interval'), 1, 60, 3);
+  state.proactiveIntervalSec = clampInt(localStorage.getItem('lina_proactive_interval_sec'), 5, 600, 20);
   state.proactiveMaxNudges = clampInt(localStorage.getItem('lina_proactive_max'), 1, 20, 4);
-  $('proactive-interval').value = state.proactiveIntervalMin;
+  $('proactive-interval').value = state.proactiveIntervalSec;
   $('proactive-max-nudges').value = state.proactiveMaxNudges;
-  // "首次 N 分钟"直接驱动退避基准 engage_base_ms。
-  state.pacing.engage_base_ms = state.proactiveIntervalMin * 60 * 1000;
+  // "首次 N 秒"直接驱动退避基准 engage_base_ms。
+  state.pacing.engage_base_ms = state.proactiveIntervalSec * 1000;
   $('proactive-config').classList.toggle('disabled', !state.proactiveEnabled);
 }
 function setProactivePref(on) {
@@ -3997,11 +3997,11 @@ function setProactivePref(on) {
   if (on) resetIdle();
 }
 function setProactiveInterval(v) {
-  const n = clampInt(v, 1, 60, state.proactiveIntervalMin);
-  state.proactiveIntervalMin = n;
-  localStorage.setItem('lina_proactive_interval', String(n));
+  const n = clampInt(v, 5, 600, state.proactiveIntervalSec);
+  state.proactiveIntervalSec = n;
+  localStorage.setItem('lina_proactive_interval_sec', String(n));
   $('proactive-interval').value = n;
-  state.pacing.engage_base_ms = n * 60 * 1000;
+  state.pacing.engage_base_ms = n * 1000;
   resetIdle();
 }
 function setProactiveMaxNudges(v) {

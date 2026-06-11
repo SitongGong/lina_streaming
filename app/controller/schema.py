@@ -37,6 +37,20 @@ _VALID_MODULES = frozenset({
 })
 
 
+# few-shot 示例库白名单：Plan.fewshot_tags 只接受这些 tag，对应
+# prompts/controller/fewshot/<tag>.txt。加新场景就往这里加一个 tag + 一个文件。
+_VALID_FEWSHOT = frozenset({
+    "typo_tolerance",        # 善意理解错别字
+    "no_trailing_question",  # 别连环甩问号
+    "positive_response",     # 报喜要共情、别浇冷水
+    "comfort",               # 低落时先接住情绪、别说教
+    "modern_boundary",       # 现代请求茫然以对、别出戏
+})
+# 一轮最多注入几组示例，避免撑爆 token。放到 2 易把场景库挤掉（场景库 +
+# 通用库 no_trailing_question/typo_tolerance 常一起触发），放宽到 3。
+_MAX_FEWSHOT_TAGS = 3
+
+
 def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -147,6 +161,10 @@ class LinaPromptPlan:
     use_static_personality: bool = True
     use_static_hobbies: bool = True
     use_static_others: bool = True
+    # world.md（世界观设定）/ sample_conversations.md（说话范例）现在按场景检索，
+    # 不再永远全量。默认开（保守：不确定时仍给），由规则/顾问按场景关掉省 token。
+    use_world: bool = True
+    use_sample_conversations: bool = True
     use_history_recall: bool = True
     use_cross_session_memory: bool = True
     # 是否检索「莉娜自我事实清单」（她亲口说过的关于自己的事）。默认不查——
@@ -186,6 +204,19 @@ class LinaPromptPlan:
     allow_segment: bool = True
     max_segments: int = 3
 
+    # 行为微调（controller 按场景动态注入到本轮约束块，不改主模型 prompt）：
+    # suppress_trailing_question=本轮抑制"句尾强行甩问号"的习惯（主模型人设里
+    #   "追问/问句多"指令太强，导致每条结尾都硬问；开了就压一压）。
+    # lenient_typos=本轮善意理解用户的错别字/笔误，按最合理意思接住，不揪着错字
+    #   反复追问纠错（主模型 prompt 缺这条容错指令）。
+    suppress_trailing_question: bool = False
+    lenient_typos: bool = False
+    # 用户本轮在报喜/表达好转——开启则带出 positive_response 示例（替对方高兴、别浇冷水）。
+    user_positive: bool = False
+    # 本轮要注入哪些 few-shot 示例（按 tag，对应 fewshot/<tag>.txt）。由 suppress/
+    # lenient 等开关自动带出，也可由规则/顾问直接指定。post_init 去重+白名单+截断。
+    fewshot_tags: tuple[str, ...] = ()
+
     # mood continuity
     enforce_mood_continuity: bool = True
 
@@ -197,6 +228,8 @@ class LinaPromptPlan:
         object.__setattr__(self, "use_static_personality", _coerce_bool(self.use_static_personality))
         object.__setattr__(self, "use_static_hobbies", _coerce_bool(self.use_static_hobbies))
         object.__setattr__(self, "use_static_others", _coerce_bool(self.use_static_others))
+        object.__setattr__(self, "use_world", _coerce_bool(self.use_world))
+        object.__setattr__(self, "use_sample_conversations", _coerce_bool(self.use_sample_conversations))
         object.__setattr__(self, "use_history_recall", _coerce_bool(self.use_history_recall))
         object.__setattr__(
             self, "use_cross_session_memory", _coerce_bool(self.use_cross_session_memory)
@@ -226,6 +259,11 @@ class LinaPromptPlan:
         object.__setattr__(self, "allow_segment", _coerce_bool(self.allow_segment))
         object.__setattr__(self, "max_segments", _clamp_int(self.max_segments, 3, 1, 3))
         object.__setattr__(self, "tone_hint", _normalize_text(self.tone_hint)[:12])
+        object.__setattr__(self, "suppress_trailing_question", _coerce_bool(self.suppress_trailing_question))
+        object.__setattr__(self, "lenient_typos", _coerce_bool(self.lenient_typos))
+        object.__setattr__(self, "user_positive", _coerce_bool(self.user_positive))
+        tags = tuple(t for t in _unique_keep_order(self.fewshot_tags) if t in _VALID_FEWSHOT)
+        object.__setattr__(self, "fewshot_tags", tags[:_MAX_FEWSHOT_TAGS])
         object.__setattr__(self, "enforce_mood_continuity", _coerce_bool(self.enforce_mood_continuity))
         object.__setattr__(self, "trace_source", _normalize_text(self.trace_source) or "fallback")
         object.__setattr__(self, "matched_rule", _normalize_text(self.matched_rule))
@@ -266,6 +304,10 @@ class LinaPromptPlan:
             sources.append("hobbies.md")
         if self.use_static_others:
             sources.append("others.md")
+        if self.use_world:
+            sources.append("world.md")
+        if self.use_sample_conversations:
+            sources.append("sample_conversations.md")
         return tuple(sources)
 
     def to_dict(self) -> dict[str, Any]:

@@ -66,9 +66,13 @@ class LinaPromptComposer:
             module_texts[module_name] = text
             blocks.append(text)
 
-        constraint_block = self._build_constraint_block(plan)
+        constraint_block = self._build_constraint_block(plan)      # 构建本轮回复的约束，比如容纳错别字，是否分段说，是否限制连珠炮的提问
         if constraint_block:
             blocks.append(constraint_block)
+
+        fewshot_block = self._build_fewshot_block(plan)     # 总结一些few-shot示例，辅助模型回答
+        if fewshot_block:
+            blocks.append(fewshot_block)
 
         instruction_block = self._build_instruction_block(plan)
         if instruction_block:
@@ -80,6 +84,8 @@ class LinaPromptComposer:
             "module_chars": sum(len(t) for t in module_texts.values()),
             "constraint_chars": len(constraint_block),
             "instruction_chars": len(instruction_block),
+            "fewshot_tags": list(plan.fewshot_tags),
+            "fewshot_chars": len(fewshot_block),
             "tail_total_chars": len(tail_text),
             "trace_source": plan.trace_source,
             "matched_rule": plan.matched_rule,
@@ -108,7 +114,45 @@ class LinaPromptComposer:
                 f"- 本轮**如果有多个意思**可以分段说：第一段先发，其余写进 [segments:…]，"
                 f"最多 {plan.max_segments} 段；只有一个意思就别硬凑。"
             )
+        # 行为微调（controller 按场景注入，主模型 prompt 不动）。
+        if plan.suppress_trailing_question:
+            if plan.module_world_immersion:
+                # 兴奋点：保留她的好奇，但限"一次一个问题"，别第一段就连珠炮。
+                lines.append(
+                    "- 你对这个话题很感兴趣，可以追问——但**一条消息里最多一个问号**，"
+                    "别第一段就连甩两三个问句像审问。先给一句你自己的真反应/感想，再问那一个最想问的。"
+                )
+            else:
+                lines.append(
+                    "- 本轮**不要在结尾硬甩问句**：可以陈述、附和、分享自己类似的经历来接住话，"
+                    "不必每条都用问号收尾。真有想问的，**最多问一个**，别连珠炮追问、别为了显得在互动而凑问句。"
+                )
+        if plan.lenient_typos:
+            lines.append(
+                "- 用户可能有错别字/漏字/拼音/同音字：**按最通顺合理的意思去理解**，自然接住，"
+                "就当对方本来要说的是那个意思。**不要揪着明显的笔误反复追问、纠错、或当成没听过的怪词**。"
+                "只有整句确实无法推断时才轻描淡写确认一次。"
+            )
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_fewshot_block(plan: LinaPromptPlan) -> str:
+        """按 plan.fewshot_tags 读 fewshot/<tag>.txt，拼成「参考示例」块。
+        放在动态尾块（非 cached），所以换示例不破坏 prompt 缓存。"""
+        if not plan.fewshot_tags:
+            return ""
+        bodies: list[str] = []
+        for tag in plan.fewshot_tags:
+            text = load_prompt(f"controller/fewshot/{tag}.txt").strip()
+            if text:
+                bodies.append(text)
+        if not bodies:
+            return ""
+        joined = "\n\n".join(bodies)
+        return (
+            "【本轮参考示例 — 只学其中的**说话方式/分寸**，不要照抄示例里的具体内容】\n"
+            f"{joined}"
+        )
 
     @staticmethod
     def _build_instruction_block(plan: LinaPromptPlan) -> str:

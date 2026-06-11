@@ -269,7 +269,7 @@ class LinaController:
             self._last_trace = {"source": "fallback", "reason": "no_llm", "plan": plan.to_dict()}
             return plan
 
-        # 3) Fan-out advisors.
+        # 3) Fan-out advisors.       规则无法判断时，启动LLM advisor来判断
         started = time.monotonic()
         results = await self._run_advisors(ctx)
         plan = self._merge(ctx, results)
@@ -344,8 +344,14 @@ class LinaController:
             use_history_recall=True,
             use_cross_session_memory=ctx.has_cross_session_memory,
             use_self_facts=merged.get("use_self_facts", False),
+            # world.md / sample_conversations.md 现在也在检索集，默认都查（保守）；
+            # 具体场景收窄交给规则层。
+            use_world=merged.get("use_world", True),
+            use_sample_conversations=merged.get("use_sample_conversations", True),
             query_hint=merged.get("query_hint", ""),
-            retrieve_k=4,
+            # 检索集变大（多了 world/sample_conversations），top-k 相应调高，
+            # 否则相关片段可能被挤掉。
+            retrieve_k=6,
             history_recall_k=3,
             history_window=merged.get("history_window", 24),
             module_user_vent=merged.get("module_user_vent", False),
@@ -357,6 +363,9 @@ class LinaController:
             hook_callback=merged.get("hook_callback", False),
             hook_history_recall=merged.get("hook_history_recall", False),
             allow_doubt_wrap=merged.get("allow_doubt_wrap", True),
+            suppress_trailing_question=merged.get("suppress_trailing_question", True),
+            lenient_typos=merged.get("lenient_typos", True),
+            user_positive=merged.get("user_positive", False),
             sentences=merged.get("sentences", 2),
             max_reply_chars=merged.get("max_reply_chars", 45),
             allow_segment=merged.get("allow_segment", False),
@@ -366,6 +375,25 @@ class LinaController:
             trace_source="llm",
             matched_rule="",
         )
+
+        # few-shot 搭车（与规则层 _apply_behavior_defaults 对称）：LLM 路径也要
+        # 把开关/点亮的模块带出对应示例 tag，否则判了却没注入示例。
+        # 场景专属示例放最前（优先级高，截断时先保留）。
+        tags: list[str] = []
+        if plan.user_positive:
+            tags.append("positive_response")        # 报喜：替对方高兴、别浇冷水（优先级最高）
+        if plan.module_user_vent:
+            tags.append("comfort")                  # 安抚
+        if plan.module_action_boundary:
+            tags.append("modern_boundary")          # 现代边界
+        if plan.module_relationship_recall and "positive_response" not in tags:
+            tags.append("positive_response")        # 回访常含报喜/致谢
+        if plan.suppress_trailing_question and "no_trailing_question" not in tags:
+            tags.append("no_trailing_question")
+        if plan.lenient_typos and "typo_tolerance" not in tags:
+            tags.append("typo_tolerance")
+        if tags:
+            plan = LinaPromptPlan(**{**plan.to_dict(), "fewshot_tags": tuple(tags)})
 
         # Proactive path always stays short, regardless of what the advisors said.
         if ctx.is_proactive:
