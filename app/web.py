@@ -33,6 +33,7 @@ from .config import (
     STATIC_DIR,
     USERS_FILE,
     resolve_admin_users,
+    resolve_api_access_keys,
     resolve_api_key,
     resolve_controller_settings,
     resolve_openai_api_key,
@@ -40,7 +41,7 @@ from .config import (
     resolve_secret_key,
 )
 from .controller import LinaController, build_default_controller
-from .conversation import ConversationStore
+from .conversation import Conversation, ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
 from .self_facts import SelfFactsStore
@@ -542,6 +543,59 @@ def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
         )
         _engine_pool[key] = engine
         return engine
+
+
+# --- OpenAI 兼容公开接口用的共享引擎 ---------------------------------------
+# 外部调用方（用 OpenAI SDK）不走网页的 per-client key 机制，这里用服务端默认
+# Anthropic key 构造一个共享引擎，懒加载、全局复用。
+_openai_api_engine: CharacterEngine | None = None
+_openai_api_engine_lock = threading.Lock()
+
+
+def _openai_compat_engine() -> CharacterEngine | None:
+    """懒加载一个共享引擎，给 /v1/chat/completions 用。无服务端 key → None。"""
+    global _openai_api_engine
+    if _openai_api_engine is not None:
+        return _openai_api_engine
+    with _openai_api_engine_lock:
+        if _openai_api_engine is None:
+            key = resolve_api_key()  # 服务端默认 Anthropic key
+            if not key:
+                return None
+            _openai_api_engine = CharacterEngine(
+                api_key=key,
+                static_dir=STATIC_DIR,
+                model=DEFAULT_MODEL,
+                controller=_ensure_controller(),
+            )
+        return _openai_api_engine
+
+
+def _conv_from_openai_messages(messages: list) -> tuple[Conversation, str]:
+    """把 OpenAI 的 messages 数组转成 (临时会话, 最后一条用户消息)。
+
+    system 消息忽略（Lina 的人设由自己的 prompt 决定，不接受外部 system 覆盖）。
+    除最后一条 user 外的 user/assistant 都作为历史塞进临时会话；最后一条 user
+    作为本轮输入返回。临时会话不入库（每次调用无状态，符合 OpenAI 接口习惯）。
+    """
+    conv = Conversation(session_id="openai-api-ephemeral")
+    norm = [
+        (str(m.get("role", "")), str(m.get("content", "")))
+        for m in (messages or [])
+        if isinstance(m, dict) and str(m.get("content", "")).strip()
+    ]
+    # 找最后一条 user 作为本轮输入；它之前的都是历史。
+    last_user_idx = max(
+        (i for i, (r, _) in enumerate(norm) if r == "user"), default=-1
+    )
+    if last_user_idx < 0:
+        return conv, ""
+    for i, (role, content) in enumerate(norm):
+        if i == last_user_idx:
+            continue
+        if role in ("user", "assistant"):
+            conv.add(role, content)
+    return conv, norm[last_user_idx][1]
 
 
 def _pop_engines_with_suffix(suffix: str) -> None:
@@ -1610,5 +1664,104 @@ def create_app() -> Flask:
         _save_overrides_to_disk(_overrides)
         _invalidate_current_engine()
         return jsonify({"ok": True, "imported": list(filtered.keys()), "ignored": ignored})
+
+    # ---------- OpenAI 兼容接口：/v1/chat/completions ----------
+    # 让外部用 OpenAI SDK / 任意兼容客户端直接调 Lina。支持 stream=true。
+    # 只返回纯文本回复（mood / [segments] 已由引擎剥除）。暂不鉴权。
+    @app.route("/v1/chat/completions", methods=["POST"])
+    def openai_chat_completions():
+        # 鉴权：配了 LINA_API_KEYS 才校验；没配则放行（内网/调试）。
+        allowed_keys = resolve_api_access_keys()
+        if allowed_keys:
+            auth = request.headers.get("Authorization", "")
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            if token not in allowed_keys:
+                return jsonify({
+                    "error": {"message": "无效或缺失的 API key", "type": "invalid_request_error",
+                              "code": "invalid_api_key"}
+                }), 401
+
+        engine = _openai_compat_engine()
+        if engine is None:
+            return jsonify({
+                "error": {"message": "服务端未配置默认 API key", "type": "server_error"}
+            }), 503
+
+        data = request.get_json(force=True, silent=True) or {}
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return jsonify({
+                "error": {"message": "messages 不能为空", "type": "invalid_request_error"}
+            }), 400
+        stream = bool(data.get("stream", False))
+        model_name = str(data.get("model") or "lina")
+
+        conv, user_message = _conv_from_openai_messages(messages)
+        if not user_message:
+            return jsonify({
+                "error": {"message": "messages 里没有 user 消息", "type": "invalid_request_error"}
+            }), 400
+
+        # 固定/伪造的 id 和时间戳（OpenAI 响应需要这些字段）。
+        completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
+        created = int(time.time())
+
+        if stream:
+            def event_stream():
+                # 首个 chunk 带 role，符合 OpenAI 流式约定。
+                first = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model_name,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+                try:
+                    for ev in engine.chat_stream(conv, user_message):
+                        if ev.get("type") != "delta":
+                            continue  # mood/done 不外露，只流文本
+                        text = ev.get("text") or ""
+                        if not text:
+                            continue
+                        chunk = {
+                            "id": completion_id, "object": "chat.completion.chunk",
+                            "created": created, "model": model_name,
+                            "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                except Exception as e:  # noqa: BLE001
+                    err = {"error": {"message": str(e), "type": "server_error"}}
+                    yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                # 收尾 chunk：finish_reason=stop + [DONE]，OpenAI 客户端据此结束。
+                done = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model_name,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+                yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return Response(event_stream(), mimetype="text/event-stream")
+
+        # 非流式：跑完整 chat()，一次性返回。
+        try:
+            result = engine.chat(conv, user_message)
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"error": {"message": str(e), "type": "server_error"}}), 500
+        return jsonify({
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model_name,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": result.text},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": result.input_tokens,
+                "completion_tokens": result.output_tokens,
+                "total_tokens": result.input_tokens + result.output_tokens,
+            },
+        })
 
     return app

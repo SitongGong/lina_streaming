@@ -24,6 +24,17 @@ def resolve_admin_users() -> set[str]:
     raw = os.environ.get("LINA_ADMIN_USERS", "")
     return {u.strip() for u in re.split(r"[,\s]+", raw) if u.strip()}
 
+
+def resolve_api_access_keys() -> set[str]:
+    """OpenAI 兼容接口 /v1/chat/completions 的访问 key 集合。
+
+    来自环境变量 LINA_API_KEYS，逗号/空格分隔，可配多个。
+    - 未配置（空集合）→ **不鉴权**，任何人可调（适合内网/调试）。
+    - 配置了 → 调用方必须在 Authorization: Bearer <key> 里带其中一个，否则 401。
+    """
+    raw = os.environ.get("LINA_API_KEYS", "")
+    return {k.strip() for k in re.split(r"[,\s]+", raw) if k.strip()}
+
 # ---- 可选账号登录（融合：登录用户走账号身份 + 独立目录；匿名用户走 client_id）----
 USERS_DIR = PROJECT_ROOT / "users"
 USERS_FILE = USERS_DIR / "users.json"
