@@ -109,43 +109,31 @@ _DEFAULT_ANTHROPIC_CONTROLLER_MODEL = "claude-haiku-4-5-20251001"
 def resolve_controller_settings() -> dict:
     """决定 controller（规则层之上的 LLM 顾问 / 回复切分 / 自我记忆）用哪个 provider。
 
-    provider 由 LINA_CONTROLLER_PROVIDER 指定（"anthropic" | "openai"）；未指定时
-    自动推断：有 OPENAI_API_KEY → openai；否则有 Anthropic key → anthropic（走其
-    OpenAI 兼容端点，模型默认用 Claude Haiku）；都没有 → none（退到只走规则层）。
+    **一律走 Claude**：所有 controller 的 LLM 请求都打到 Anthropic（默认 Claude
+    Haiku，走其 OpenAI 兼容端点），**绝不向真正的 OpenAI 发请求**。因此：
+    - 有 Anthropic key → anthropic。
+    - 没有 Anthropic key → none（退到只走规则层）；**不再回落到 OpenAI**，
+      即便设置了 OPENAI_API_KEY 也不会用。
+    - LINA_CONTROLLER_PROVIDER / OPENAI_API_KEY 不再影响 provider 选择（保留环境
+      变量只是为了兼容旧配置，不会再触发 OpenAI 调用）。
 
     覆盖项：LINA_CONTROLLER_MODEL、LINA_CONTROLLER_BASE_URL。
     返回 {provider, api_key, model, base_url}。
     """
-    provider = (os.environ.get("LINA_CONTROLLER_PROVIDER") or "").strip().lower()
-    openai_key = resolve_openai_api_key()
     anthropic_key = resolve_api_key()
-    if not provider:
-        if openai_key:
-            provider = "openai"
-        elif anthropic_key:
-            provider = "anthropic"
-        else:
-            provider = "none"
     model_override = (os.environ.get("LINA_CONTROLLER_MODEL") or "").strip() or None
     base_override = (os.environ.get("LINA_CONTROLLER_BASE_URL") or "").strip() or None
-    if provider == "anthropic":
+    if anthropic_key:
         return {
             "provider": "anthropic",
             "api_key": anthropic_key,
             "model": model_override or _DEFAULT_ANTHROPIC_CONTROLLER_MODEL,
             "base_url": base_override or ANTHROPIC_OPENAI_COMPAT_BASE_URL,
         }
-    if provider == "openai":
-        return {
-            "provider": "openai",
-            "api_key": openai_key,
-            "model": model_override or _DEFAULT_OPENAI_CONTROLLER_MODEL,
-            "base_url": base_override,
-        }
     return {
         "provider": "none",
         "api_key": None,
-        "model": model_override or _DEFAULT_OPENAI_CONTROLLER_MODEL,
+        "model": model_override or _DEFAULT_ANTHROPIC_CONTROLLER_MODEL,
         "base_url": base_override,
     }
 
