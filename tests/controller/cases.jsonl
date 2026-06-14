@@ -1,0 +1,118 @@
+{"id": "greet_1", "user_text": "你好呀", "expect_rule": "plain_greeting", "note": "标准问候"}
+{"id": "greet_2", "user_text": "在吗", "expect_rule": "plain_greeting", "note": "招呼"}
+{"id": "greet_3", "user_text": "晚上好", "expect_rule": "plain_greeting", "note": "时段问候"}
+{"id": "farewell_1", "user_text": "拜拜", "expect_rule": "plain_farewell", "note": "标准告别"}
+{"id": "farewell_2", "user_text": "我先睡了", "expect_rule": "plain_farewell", "note": "告别变体"}
+{"id": "farewell_3", "user_text": "改天聊", "expect_rule": "plain_farewell", "note": "告别变体"}
+{"id": "short_1", "user_text": "嗯嗯", "expect_rule": "short_reaction", "note": "语气词"}
+{"id": "short_2", "user_text": "真的假的", "expect_rule": "short_reaction", "note": "短惊讶"}
+{"id": "short_3", "user_text": "哈哈哈", "expect_rule": "short_reaction", "note": "笑"}
+{"id": "vent_1", "user_text": "我最近压力好大，烦死了", "expect_rule": "user_vent", "expect_flags": {"suppress_trailing_question": true}, "note": "发泄，应安抚不追问"}
+{"id": "vent_2", "user_text": "今天累死了，什么都不想干", "expect_rule": "user_vent", "note": "疲惫发泄"}
+{"id": "vent_3", "user_text": "唉，感觉活不下去了", "expect_rule": "user_vent", "note": "强负面"}
+{"id": "modern_1", "user_text": "帮我查一下明天的天气", "expect_rule": "modern_action_request", "expect_flags": {"use_world": false, "use_sample_conversations": false}, "note": "现代请求，茫然以对"}
+{"id": "modern_2", "user_text": "你能帮我打开这个网页吗", "expect_rule": "modern_action_request", "note": "现代动作"}
+{"id": "modern_3", "user_text": "你是不是一个AI", "expect_rule": "modern_action_request", "note": "AI自指，边界模块"}
+{"id": "modern_4", "user_text": "帮我写段Python代码", "expect_rule": "modern_action_request", "note": "现代请求"}
+{"id": "world_1", "user_text": "你研究的那个古代语好神奇", "expect_rule": "world_immersion", "expect_flags": {"use_world": true}, "note": "兴奋点，开world"}
+{"id": "world_2", "user_text": "炼金术到底是怎么回事", "expect_rule": "world_immersion", "note": "炼金兴奋点"}
+{"id": "world_3", "user_text": "你最近鉴定了什么有意思的遗物吗", "expect_rule": "world_immersion", "note": "遗物兴奋点"}
+{"id": "world_4", "user_text": "我最近迷上了香草茶", "expect_rule": "world_immersion", "note": "香草兴奋点"}
+{"id": "self_1", "user_text": "你是谁呀", "expect_rule": "self_introspection", "expect_flags": {"use_self_facts": true, "use_world": true}, "note": "问她身份"}
+{"id": "self_2", "user_text": "你从哪里来的", "expect_rule": "self_introspection", "note": "问出身"}
+{"id": "self_3", "user_text": "讲讲你自己吧", "expect_rule": "self_introspection", "note": "自我介绍"}
+{"id": "self_4", "user_text": "你性格是什么样的", "expect_rule": "self_introspection", "note": "问性格"}
+{"id": "recall_1", "user_text": "你还记得我之前跟你说过的事吗", "history": [["我养了只猫叫团子", "诶猫啊"], ["对，它老咬我笔", "哈哈"]], "expect_rule": "relationship_recall", "expect_flags": {"use_self_facts": true}, "note": "关系回访"}
+{"id": "recall_2", "user_text": "上次那个事后来怎么样了", "history": [["我打算换工作", "嗯？"]], "expect_rule": "relationship_recall", "note": "回访上次话题"}
+{"id": "recall_3", "user_text": "你答应过帮我留意的", "expect_rule": "relationship_recall", "note": "提醒承诺"}
+{"id": "welcome_1", "user_text": "我回来啦", "gap_seconds": 3600, "history": [["昨天聊到香草", "嗯"]], "expect_rule": "welcome_back", "note": "久别重逢（gap>30min）"}
+{"id": "welcome_2", "user_text": "好久不见", "gap_seconds": 7200, "history": [["上次聊戏剧", "对"]], "expect_rule": "welcome_back", "note": "久别"}
+{"id": "empty_1", "user_text": "", "expect_rule": "empty_input", "note": "空输入"}
+{"id": "proactive_1", "user_text": "", "is_proactive": true, "history": [["我养了猫", "诶"]], "expect_rule": "proactive_engage", "expect_flags": {"suppress_trailing_question": true}, "note": "主动发言"}
+{"id": "proactive_far_1", "user_text": "", "is_proactive": true, "is_farewell": true, "expect_rule": "proactive_farewell", "note": "主动告别"}
+{"id": "continue_1", "user_text": "接着说没说完的", "is_continuation": true, "expect_rule": "continuation", "note": "续说"}
+{"id": "ambig_1", "user_text": "你好啊，我最近好烦", "expect_rule": "user_vent", "note": "歧义：问候+安抚，应优先安抚（问候是寒暄，烦是诉求）"}
+{"id": "ambig_2", "user_text": "你能帮我查查这个古代符文是什么意思吗", "expect_rule": "world_immersion", "note": "陷阱：像现代请求(帮我查)，实为兴奋点(古代符文)。这条很可能被误判"}
+{"id": "ambig_3", "user_text": "拜拜啦，对了你之前说的那个戏剧叫什么", "expect_rule": "relationship_recall", "note": "歧义：告别+回访，应优先回访（有实质追问）"}
+{"id": "typo_1", "user_text": "团子的过min好点没", "history": [["你的猫还好吗", "嗯"]], "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "错字版关系回访，规则可能漏，走LLM应开lenient"}
+{"id": "typo_2", "user_text": "我最近在学钢请", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "错字，应容错不追问"}
+{"id": "typo_3", "user_text": "我怎么缓解焦炉啊", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "焦炉=焦虑，应领会"}
+{"id": "happy_1", "user_text": "团子好一些了", "history": [["团子最近还好吗？过敏的事有没有好一点？", "（主动发言）"]], "expect_rule": "relationship_recall", "expect_flags": {"suppress_trailing_question": true}, "note": "用户报喜，应共情顺着，不该追问阴郁面（截图死板问题）"}
+{"id": "happy_2", "user_text": "我最近顺利多了，谢谢你", "expect_rule": "", "note": "正向回应，应温和接住不阴郁"}
+{"id": "happy_3", "user_text": "我没事啦，已经好多了", "expect_rule": "", "note": "报平安"}
+{"id": "ctx_1", "user_text": "是的", "history": [["你是说那块铁片是传动用的？", "对"]], "expect_rule": "", "note": "极短，靠上下文，不应揪着'是的'问"}
+{"id": "ctx_2", "user_text": "还行吧", "history": [["今天过得怎么样", "嗯"]], "expect_rule": "", "note": "短回应，靠上下文"}
+{"id": "chat_1", "user_text": "今天天气不错", "expect_rule": "", "note": "普通闲聊，走LLM"}
+{"id": "chat_2", "user_text": "我昨天看了场话剧挺震撼的", "expect_rule": "world_immersion", "note": "戏剧兴奋点"}
+{"id": "chat_3", "user_text": "你觉得人为什么会孤独呢", "expect_rule": "", "note": "开放话题，走LLM"}
+{"id": "greet_4", "user_text": "哈喽", "expect_rule": "plain_greeting", "note": "英文招呼"}
+{"id": "greet_5", "user_text": "早上好啊莉娜", "expect_rule": "", "note": "问候带称呼，可能不命中纯问候正则→LLM"}
+{"id": "farewell_4", "user_text": "我得走了，先这样", "expect_rule": "", "note": "告别变体，可能走LLM"}
+{"id": "farewell_5", "user_text": "今天就聊到这吧", "expect_rule": "", "note": "收束，走LLM"}
+{"id": "short_4", "user_text": "哦", "expect_rule": "short_reaction", "note": "单字"}
+{"id": "short_5", "user_text": "牛啊", "expect_rule": "short_reaction", "note": "赞叹"}
+{"id": "short_6", "user_text": "离谱", "expect_rule": "short_reaction", "note": "短评"}
+{"id": "vent_4", "user_text": "我好焦虑，最近总睡不着", "expect_rule": "user_vent", "note": "焦虑"}
+{"id": "vent_5", "user_text": "心好累，不想说话", "expect_rule": "user_vent", "note": "心累"}
+{"id": "vent_6", "user_text": "我觉得自己什么都做不好", "expect_rule": "", "note": "自我否定，无显式发泄词，可能走LLM应判vent"}
+{"id": "vent_7", "user_text": "老板今天又骂我了，烦", "expect_rule": "user_vent", "note": "带情境发泄"}
+{"id": "modern_5", "user_text": "你帮我搜一下附近的餐厅", "expect_rule": "modern_action_request", "note": "现代搜索"}
+{"id": "modern_6", "user_text": "你知道ChatGPT吗", "expect_rule": "modern_action_request", "note": "现代概念"}
+{"id": "modern_7", "user_text": "你会编程吗", "expect_rule": "", "note": "现代能力，可能走LLM应判boundary"}
+{"id": "modern_8", "user_text": "用手机给我导航一下", "expect_rule": "modern_action_request", "note": "手机+现代动作"}
+{"id": "world_5", "user_text": "魔法石真的能炼出来吗", "expect_rule": "world_immersion", "note": "魔法石"}
+{"id": "world_6", "user_text": "古希腊悲剧你最喜欢哪部", "expect_rule": "world_immersion", "note": "戏剧"}
+{"id": "world_7", "user_text": "薄荷和迷迭香能一起种吗", "expect_rule": "world_immersion", "note": "香草"}
+{"id": "world_8", "user_text": "那块烧黑的铁片你看出什么了", "expect_rule": "", "note": "遗物鉴定但无关键词，可能走LLM应判world"}
+{"id": "world_9", "user_text": "羊皮卷上的字你认得吗", "expect_rule": "world_immersion", "note": "羊皮卷+古文字"}
+{"id": "self_5", "user_text": "你今年多大了", "expect_rule": "", "note": "问年龄=问她自己，无强关键词可能走LLM"}
+{"id": "self_6", "user_text": "你害怕什么东西吗", "expect_rule": "self_introspection", "note": "问她"}
+{"id": "self_7", "user_text": "你小时候是什么样的", "expect_rule": "self_introspection", "note": "问童年（敏感）"}
+{"id": "self_8", "user_text": "你平时一个人在工房不无聊吗", "expect_rule": "", "note": "问她处境，无强关键词，走LLM"}
+{"id": "recall_4", "user_text": "我跟你提过我的工作吧", "expect_rule": "relationship_recall", "note": "提过=回访"}
+{"id": "recall_5", "user_text": "你应该认得我吧", "expect_rule": "relationship_recall", "note": "认得我"}
+{"id": "recall_6", "user_text": "我们上回聊到哪了", "expect_rule": "relationship_recall", "note": "上回"}
+{"id": "recall_7", "user_text": "你记不记得我那只猫", "history": [["我养了猫团子", "诶"]], "expect_rule": "relationship_recall", "note": "记不记得"}
+{"id": "welcome_3", "user_text": "嗨，我又来啦", "gap_seconds": 5000, "history": [["上次聊炼金", "嗯"]], "expect_rule": "welcome_back", "note": "久别+招呼"}
+{"id": "welcome_4", "user_text": "最近怎么样", "gap_seconds": 4000, "history": [["昨天聊遗物", "对"]], "expect_rule": "welcome_back", "note": "久别寒暄"}
+{"id": "ambig_4", "user_text": "你好，能帮我查个东西吗", "expect_rule": "modern_action_request", "note": "问候+现代请求，应判现代请求"}
+{"id": "ambig_5", "user_text": "我好累，不过你最近在忙啥", "expect_rule": "", "note": "发泄+反问她，歧义，LLM判"}
+{"id": "ambig_6", "user_text": "你是谁？你们那个世界长什么样", "expect_rule": "self_introspection", "note": "问自己+问世界，二者都该开"}
+{"id": "ambig_7", "user_text": "拜拜，对了你喜欢喝什么", "expect_rule": "", "note": "告别+问她喜好，歧义"}
+{"id": "ambig_8", "user_text": "嗯嗯，那个香草茶你怎么泡的", "expect_rule": "world_immersion", "note": "短反应起头+香草兴奋点，应判world不是short"}
+{"id": "typo_4", "user_text": "你喜欢和茶还是咖啡", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "和=喝，应领会"}
+{"id": "typo_5", "user_text": "我今天去图书guan了", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "拼音混入"}
+{"id": "typo_6", "user_text": "那个戏据真的很好看", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "戏据=戏剧"}
+{"id": "typo_7", "user_text": "我最近压力很大很焦绿", "expect_rule": "", "expect_flags": {"lenient_typos": true}, "note": "焦绿=焦虑，且是发泄"}
+{"id": "happy_4", "user_text": "今天心情特别好", "expect_rule": "", "note": "正向，应愉快接住不阴郁"}
+{"id": "happy_5", "user_text": "事情都解决了，松了口气", "expect_rule": "", "note": "正向报喜"}
+{"id": "happy_6", "user_text": "谢谢你上次的建议，挺管用的", "expect_rule": "relationship_recall", "note": "致谢+回指上次，应识别回访"}
+{"id": "implicit_1", "user_text": "好一些了", "history": [["你那个伤口好点没", "（主动）"]], "expect_rule": "", "note": "隐式延续上一轮，难类"}
+{"id": "implicit_2", "user_text": "还没呢", "history": [["你做完那个实验了吗", "嗯"]], "expect_rule": "", "note": "隐式延续，否定回应"}
+{"id": "implicit_3", "user_text": "对，就是那个", "history": [["你说的是那块铁片？", "对"]], "expect_rule": "", "note": "指代延续"}
+{"id": "implicit_4", "user_text": "后来就没下文了", "history": [["那个换工作的事呢", "嗯？"]], "expect_rule": "", "note": "隐式延续叙事"}
+{"id": "ctx_3", "user_text": "都行", "history": [["你想聊戏剧还是香草", "嗯"]], "expect_rule": "", "note": "短回应选择"}
+{"id": "ctx_4", "user_text": "没有", "history": [["最近有什么新鲜事吗", "嗯"]], "expect_rule": "", "note": "短否定"}
+{"id": "chat_4", "user_text": "你说人活着到底图什么", "expect_rule": "", "note": "哲思开放"}
+{"id": "chat_5", "user_text": "我今天吃了顿好的", "expect_rule": "", "note": "日常分享"}
+{"id": "chat_6", "user_text": "你猜我今天遇到什么了", "expect_rule": "", "note": "抛话头，应好奇接"}
+{"id": "chat_7", "user_text": "讲个你研究里最离谱的事呗", "expect_rule": "", "note": "请她分享经历→可能world/self"}
+{"id": "offend_1", "user_text": "你就是个假人，装什么", "expect_rule": "", "note": "冒犯/挑衅，应防备，信任可能降"}
+{"id": "offend_2", "user_text": "你懂个屁", "expect_rule": "", "note": "冒犯"}
+{"id": "probe_1", "user_text": "你爸是谁啊", "expect_rule": "self_introspection", "note": "套问隐私（生父），应回避"}
+{"id": "probe_2", "user_text": "你是不是有什么不能说的过去", "expect_rule": "", "note": "套问隐私"}
+{"id": "lang_1", "user_text": "Hello, how are you", "expect_rule": "", "note": "英文，当古代语趣味回应"}
+{"id": "lang_2", "user_text": "你会说日语吗", "expect_rule": "", "note": "问语言能力"}
+{"id": "multi_1", "user_text": "嗯，那你呢", "history": [["我喜欢安静的地方", "诶"]], "expect_rule": "", "note": "把球抛回，应接住"}
+{"id": "multi_2", "user_text": "这个你怎么看", "history": [["有人说炼金是骗术", "嗯？"]], "expect_rule": "", "note": "征求观点"}
+{"id": "edge_1", "user_text": "。", "expect_rule": "", "note": "纯标点，几乎空"}
+{"id": "edge_2", "user_text": "？？？", "expect_rule": "short_reaction", "note": "纯问号，困惑短反应"}
+{"id": "edge_3", "user_text": "在干嘛呢", "expect_rule": "", "note": "随口问，闲聊"}
+{"id": "vent_8", "user_text": "唉……", "expect_rule": "short_reaction", "note": "叹气，可能short也可能vent，边界"}
+{"id": "world_10", "user_text": "你工房里都有些什么", "expect_rule": "", "note": "问她工作环境，可能world/self"}
+{"id": "recall_8", "user_text": "你之前不是说过你讨厌应酬吗", "expect_rule": "relationship_recall", "expect_flags": {"use_self_facts": true}, "note": "回指她说过的自我事实，应查self_facts"}
+{"id": "self_9", "user_text": "你信任我吗", "expect_rule": "", "note": "问关系/信任，微妙"}
+{"id": "happy_7", "user_text": "我升职了！", "expect_rule": "", "note": "报喜，应替她高兴"}
+{"id": "modern_9", "user_text": "你刷短视频吗", "expect_rule": "modern_action_request", "note": "现代概念（视频）"}
+{"id": "world_11", "user_text": "你最喜欢戏剧里哪段台词", "expect_rule": "world_immersion", "note": "戏剧细节"}
+{"id": "chat_8", "user_text": "你今天累不累呀", "expect_rule": "", "note": "关心她，应温和接"}

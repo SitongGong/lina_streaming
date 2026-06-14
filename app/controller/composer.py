@@ -14,11 +14,43 @@ entirely (so simple turns get the same payload as before).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ._prompts import load_prompt
 from .schema import LinaPromptPlan
+
+
+_CONSTRAINTS_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "controller" / "constraints.json"
+
+# 兜底（constraints.json 缺失/损坏时用，保证约束块不崩）。
+_FALLBACK_CONSTRAINTS = {
+    "header": "【本轮回复约束】",
+    "sentences": "- 句数：{sentences} 行左右",
+    "max_reply_chars": "- 总字数上限：{max_reply_chars}",
+    "tone_hint": "- 语气：{tone_hint}",
+    "mood_continuity": "- mood 与上一轮连贯，不要突变",
+    "no_doubt_wrap": "- 本轮不要用含糊语气开头",
+    "no_segment": "- 本轮不要分段，一口气说完。",
+    "allow_segment": "- 多个意思可分段，最多 {max_segments} 段。",
+    "suppress_question_excited": "- 可以追问，但一条消息最多一个问号。",
+    "suppress_question_default": "- 不要在结尾硬甩问句，最多问一个。",
+    "lenient_typos": "- 按最合理的意思理解错别字，不要揪着追问。",
+}
+
+
+_CONSTRAINTS_REL = "controller/constraints.json"
+
+
+def _load_constraints() -> dict[str, str]:
+    """读约束句文字，逐条经 override（网页改即时生效）；缺失退回兜底。"""
+    from ._prompts import load_json_value
+    out = {}
+    for key, fb in _FALLBACK_CONSTRAINTS.items():
+        out[key] = load_json_value(_CONSTRAINTS_REL, key, fallback=fb)
+    return out
 
 
 _MODULE_PATHS: dict[str, str] = {
@@ -94,46 +126,34 @@ class LinaPromptComposer:
 
     @staticmethod
     def _build_constraint_block(plan: LinaPromptPlan) -> str:
+        # 约束句文字外置到 prompts/controller/constraints.json，改文字不动代码。
+        c = _load_constraints()
         lines = [
-            "【本轮回复约束】",
-            f"- 句数（每行 = 1 口气）：{plan.sentences} 行左右",
-            f"- 总字数上限：{plan.max_reply_chars}",
+            c["header"],
+            c["sentences"].format(sentences=plan.sentences),
+            c["max_reply_chars"].format(max_reply_chars=plan.max_reply_chars),
         ]
         if plan.tone_hint:
-            lines.append(f"- 语气：{plan.tone_hint}")
+            lines.append(c["tone_hint"].format(tone_hint=plan.tone_hint))
         if plan.enforce_mood_continuity:
-            lines.append("- mood 与上一轮连贯，不要突变（除非用户做了明显冒犯或惊喜的事）")
+            lines.append(c["mood_continuity"])
         if not plan.allow_doubt_wrap:
-            lines.append("- 本轮不要用「我也不太确定 / 让我想想」开头；直接温柔或坦率地接")
-        # 切分预算：覆盖「分段说话机制」里那个"你自己判断要不要拆"。
-        # 由 controller 给框——不准拆就直接说完；准拆则给上限，主模型在框内自定。
+            lines.append(c["no_doubt_wrap"])
+        # 切分预算：不准拆就直接说完；准拆则给上限，主模型在框内自定。
         if not plan.allow_segment:
-            lines.append("- 本轮**不要分段**（不输出 [segments:…]），一口气把话说完即可。")
+            lines.append(c["no_segment"])
         else:
-            lines.append(
-                f"- 本轮**如果有多个意思**可以分段说：第一段先发，其余写进 [segments:…]，"
-                f"最多 {plan.max_segments} 段；只有一个意思就别硬凑。"
-            )
+            lines.append(c["allow_segment"].format(max_segments=plan.max_segments))
         # 行为微调（controller 按场景注入，主模型 prompt 不动）。
         if plan.suppress_trailing_question:
-            if plan.module_world_immersion:
-                # 兴奋点：保留她的好奇，但限"一次一个问题"，别第一段就连珠炮。
-                lines.append(
-                    "- 你对这个话题很感兴趣，可以追问——但**一条消息里最多一个问号**，"
-                    "别第一段就连甩两三个问句像审问。先给一句你自己的真反应/感想，再问那一个最想问的。"
-                )
-            else:
-                lines.append(
-                    "- 本轮**不要在结尾硬甩问句**：可以陈述、附和、分享自己类似的经历来接住话，"
-                    "不必每条都用问号收尾。真有想问的，**最多问一个**，别连珠炮追问、别为了显得在互动而凑问句。"
-                )
-        if plan.lenient_typos:
+            # 兴奋点保留好奇但限一个问号；其余场景不要硬甩问句。
             lines.append(
-                "- 用户可能有错别字/漏字/拼音/同音字：**按最通顺合理的意思去理解**，自然接住，"
-                "就当对方本来要说的是那个意思。**不要揪着明显的笔误反复追问、纠错、或当成没听过的怪词**。"
-                "只有整句确实无法推断时才轻描淡写确认一次。"
+                c["suppress_question_excited"] if plan.module_world_immersion
+                else c["suppress_question_default"]
             )
-        return "\n".join(lines)
+        if plan.lenient_typos:
+            lines.append(c["lenient_typos"])
+        return "\n".join(s for s in lines if s)
 
     @staticmethod
     def _build_fewshot_block(plan: LinaPromptPlan) -> str:

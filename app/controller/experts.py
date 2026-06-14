@@ -345,9 +345,14 @@ def build_lina_advisors(
     Returns a dict keyed by advisor name; `LinaController` iterates over
     `.values()` and runs them concurrently. Order doesn't matter — the
     merge step is field-by-field.
+
+    每个 advisor 的判定文字（target_desc / decision_rules / range_desc）外置到
+    prompts/controller/advisor_rules.json，构造后从文件覆盖，便于在网页/文件里
+    改规则而不动代码。代码里保留的是结构（类型 / 默认值 / 上下限 / run_condition）
+    和兜底文字（JSON 缺失时仍可用）。
     """
 
-    return {
+    advisors: dict[str, _AdvisorBase] = {
         # --- style / length ---
         "tone_hint": TextAdvisor(
             client,
@@ -683,3 +688,39 @@ def build_lina_advisors(
             timeout=timeout,
         ),
     }
+
+    # 用外置 JSON 的判定文字覆盖代码里的兜底文字（便于不动代码改规则）。
+    _apply_advisor_rules(advisors)
+    return advisors
+
+
+# advisor 判定文字外置：prompts/controller/advisor_rules.json
+_ADVISOR_RULES_FILE = (
+    __import__("pathlib").Path(__file__).resolve().parent.parent.parent
+    / "prompts" / "controller" / "advisor_rules.json"
+)
+
+
+_ADVISOR_RULES_REL = "controller/advisor_rules.json"
+
+
+def _apply_advisor_rules(advisors: dict[str, "_AdvisorBase"]) -> None:
+    """用 advisor_rules.json 覆盖每个 advisor 的 target_desc / decision_rules /
+    range_desc，**逐字段经 load_json_value**（支持网页细粒度 override，即时生效）。
+    文件/字段缺失 → 保持代码内置文字（不崩）。"""
+    from ._prompts import load_json_value
+    try:
+        raw = json.loads(_ADVISOR_RULES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    for name, adv in advisors.items():
+        entry = raw.get(name) if isinstance(raw, dict) else None
+        entry = entry if isinstance(entry, dict) else {}
+        for fld in ("target_desc", "decision_rules", "range_desc"):
+            attr = "_" + fld
+            if not hasattr(adv, attr):
+                continue
+            # 默认用代码内置值兜底；JSON 有则用 JSON；override 有则用 override。
+            base = entry.get(fld, getattr(adv, attr))
+            val = load_json_value(_ADVISOR_RULES_REL, f"{name}.{fld}", fallback=str(base))
+            setattr(adv, attr, val)
