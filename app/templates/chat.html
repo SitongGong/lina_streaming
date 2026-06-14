@@ -1727,6 +1727,7 @@ let state = {
   proactiveIntervalSec: 20,  // 首次主动开口前等多少秒（驱动退避基准）
   proactiveMaxNudges: 4,     // 4 级：最近话题→更早话题→自己经历→告别
   proactiveCount: 0,         // 上一次用户互动以来已主动发言的次数
+  conversationEnded: false,  // 用户主动告别后置 true → 暂停主动发言，直到用户再开口
   lastActivity: Date.now(),
   proactiveBusy: false,
   lastMeta: null,
@@ -1966,6 +1967,7 @@ async function selectSession(id) {
   state.lastMeta = null;
   state.forcedState = null;
   state.pendingSegments = [];   // 切会话作废上一个会话的续说计划
+  state.conversationEnded = false;  // 切会话重置「已告别」状态
   clearQuote();                 // 切会话清掉悬空的引用
   resetIdle();                  // 切会话重置主动发言节奏
   renderStateBar(null, /*isStarting*/ true);
@@ -2389,6 +2391,7 @@ async function send() {
   ta.value = '';
   ta.style.height = 'auto';
   state.sending = true;
+  state.conversationEnded = false;  // 用户又发话了 → 解除「已告别」，恢复主动发言
   resetIdle();
   $('send-btn').disabled = true;
 
@@ -2420,6 +2423,10 @@ async function send() {
     // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
+    // 用户主动告别 → 温和收束后不再主动发言，直到用户下次开口。
+    if (data.plan && data.plan.matched_rule === 'plain_farewell') {
+      state.conversationEnded = true;
+    }
     await loadSessions();
     maybeAutoSurvey();   // 每 50 轮自动弹问卷
   } catch (e) {
@@ -4014,6 +4021,7 @@ function setProactiveMaxNudges(v) {
 // 闲置轮询总入口：先把没说完的段续完，再主动找话。
 async function maybeProactive() {
   if (!state.proactiveEnabled) return;
+  if (state.conversationEnded) return;   // 用户已主动告别，别再主动找话
   if (!state.ready) return;
   if (!state.currentSession) return;
   if (state.sending || state.proactiveBusy) return;

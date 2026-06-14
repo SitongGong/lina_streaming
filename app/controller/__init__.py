@@ -18,7 +18,16 @@ fallback Plan that mirrors the engine's pre-controller behavior is used.
 
 from .schema import LinaPromptPlan, LinaTurnContext
 from .controller import LinaController, build_default_controller
+from .rule_router import reload_rule_patterns
 from .composer import LinaPromptComposer, LinaPromptBundle
+from ._prompts import (
+    set_prompt_overrides,
+    get_prompt_overrides,
+    read_prompt_file,
+    read_json_value,
+    load_json_value,
+    make_json_key,
+)
 
 __all__ = [
     "LinaPromptPlan",
@@ -27,4 +36,11 @@ __all__ = [
     "build_default_controller",
     "LinaPromptComposer",
     "LinaPromptBundle",
+    "set_prompt_overrides",
+    "get_prompt_overrides",
+    "read_prompt_file",
+    "read_json_value",
+    "load_json_value",
+    "make_json_key",
+    "reload_rule_patterns",
 ]

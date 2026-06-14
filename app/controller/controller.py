@@ -18,6 +18,7 @@ or broken controller from breaking the chat path.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -69,6 +70,30 @@ def _resolve_timeouts() -> tuple[float, float]:
     total = max(0.5, total)
     advisor = max(0.2, total * 0.83)
     return total, advisor
+
+
+_PROACTIVE_STAGES_FILE = (
+    __import__("pathlib").Path(__file__).resolve().parent.parent.parent
+    / "prompts" / "controller" / "proactive_stages.json"
+)
+# 兜底（文件缺失/损坏时用）。
+_FALLBACK_STAGES = {
+    "recent": "挑你们最近一两轮里提到、但还没聊透的话头，顺着它自然往下问。",
+    "earlier": "跳过最近几轮，从更早的对话里挑一个用户提过、还算有意思的话题重新捡起来。",
+    "self": "不挑用户的话题，改成你主动抛一件自己的经历/见闻/小八卦，留个钩子等对方接。",
+}
+
+
+_PROACTIVE_STAGES_REL = "controller/proactive_stages.json"
+
+
+def _load_proactive_stages() -> dict[str, str]:
+    """读主动发言分级策略文字，逐 stage 经 override（网页改即时生效）；坏文件退回兜底。"""
+    from ._prompts import load_json_value
+    out = {}
+    for stage, fb in _FALLBACK_STAGES.items():
+        out[stage] = load_json_value(_PROACTIVE_STAGES_REL, stage, fallback=fb)
+    return out
 
 
 class LinaController:
@@ -207,22 +232,8 @@ class LinaController:
             "（已经主动抛过下面这些话头，这次必须换一个，不要重复）：\n"
             + "\n".join(f"- {h}" for h in avoid)
         ) if avoid else "（暂无，自由选择）"
-        # 分级策略：随主动次数升级，从"最近话题"→"更早话题"→"莉娜自己的经历"。
-        stage_text = {
-            "recent": (
-                "本次策略【接最近话题】：挑你们**最近一两轮**里提到、但还没聊透的话头，"
-                "顺着它自然往下问。"
-            ),
-            "earlier": (
-                "本次策略【翻更早的话题】：最近的话头对方没接，这次**跳过最近几轮**，"
-                "从**更早**的对话里挑一个用户提过、还算有意思的话题重新捡起来。"
-            ),
-            "self": (
-                "本次策略【说你自己的事】：用户对共同话题似乎没兴趣了。这次**不挑用户的话题**，"
-                "改成你（莉娜）主动抛一件**自己的**经历/见闻/小八卦（炼金、遗物、戏剧、香草这类），"
-                "结合你的人设自由发挥，留个钩子等对方接。topic_hook 写你要讲的那件事。"
-            ),
-        }.get(stage, "")
+        # 分级策略文字外置到 prompts/controller/proactive_stages.json，改策略不动代码。
+        stage_text = _load_proactive_stages().get(stage, "")
         prompt = template.format(
             history_text=_render_history(ctx.history, limit=8),
             avoid_text=avoid_text,

@@ -12,68 +12,90 @@ which path produced the decision.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 from .schema import LinaPromptPlan, LinaTurnContext
 
 
-_GREETING_PATTERNS = (
-    re.compile(r"^(你好|你好呀|哈喽|hello|hi|嗨|早上好|下午好|晚上好|在吗)$", re.I),
-    re.compile(r"^(早安|早呀|晚安|午安)$", re.I),
-)
+# 规则层关键词外置到 prompts/controller/rules.json，改关键词不必动代码。
+_RULES_FILE = Path(__file__).resolve().parent.parent.parent / "prompts" / "controller" / "rules.json"
 
-_FAREWELL_PATTERNS = (
-    re.compile(r"^(拜拜|拜|回头见|先走了|我先撤了|我先睡了|下次聊|改天聊)$", re.I),
-)
+# 内置兜底（rules.json 缺失/损坏时用，保证规则层不崩；正常以文件为准）。
+_FALLBACK_RULES: dict[str, list[str]] = {
+    "greeting": [r"^(你好|哈喽|hello|hi|嗨|早上好|晚上好|在吗)$"],
+    "farewell": [r"^(拜拜|回头见|先走了|我先睡了|下次聊|改天聊)$"],
+    "short_reaction": [r"^(嗯+|哦+|啊+|哈+|真的假的|离谱)$"],
+    "modern_action": [r"(帮我|给我).{0,12}(搜索|查询|打开|下载|运行|翻译)", r"(写段代码|打开链接)"],
+    "user_vent": [r"(累死|烦死|崩溃|心累|压力大|焦虑|好烦|太累)"],
+    "relationship_recall": [r"(还记得|记得我|之前(说|讲|聊|提)过|你答应过|好久不见)"],
+    "world_immersion": [r"(古代语|楔形|碑文|羊皮卷|炼金|魔法石|遗物|符文|戏剧|话剧|香草|草药|薄荷)"],
+    "self_introspection": [r"(你是谁|介绍一下你自己|你性格|你害怕什么|你从哪里来|你小时候)"],
+}
 
-_SHORT_REACTION_PATTERNS = (
-    re.compile(r"^(嗯+|哦+|啊+|诶+|欸+|哈+|草+|6+|牛啊|牛哇|真的假的|离谱|笑死|绷不住了)$", re.I),
-)
 
-# 现代/超出 1760 年知识边界 的请求 → 强制 action_boundary 模块
-_MODERN_ACTION_PATTERNS = (
-    re.compile(
-        r"(帮我|给我|替我).{0,12}(搜|搜索|查|查询|打开|点开|访问|下载|播放|运行|执行|生成代码|发链接|翻译)",
-        re.I,
-    ),
-    re.compile(
-        r"(你能不能|可以不可以|能不能).{0,16}(搜|查|打开|访问|下载|播放|运行|执行|写代码|控制|操作设备)",
-        re.I,
-    ),
-    re.compile(r"(打开链接|点开链接|访问网址|帮我查|写个脚本|写段代码|控制电脑|控制设备)", re.I),
-    re.compile(r"(互联网|手机|电脑|app|应用程序|api|ai|神经网络|机器学习|chatgpt|claude|gpt)", re.I),
-)
+_RULES_REL = "controller/rules.json"
 
-# 用户在 emo / 发泄
-_USER_VENT_PATTERNS = (
-    re.compile(
-        r"(累死|烦死|崩溃|emo|难受|哭了|心累|压力大|顶不住|撑不住|哭死|要命|好惨|焦虑|郁闷|窒息|好烦|真烦|太累|好累)",
-        re.I,
-    ),
-    re.compile(r"(唉+|哎+).{0,4}(累|烦|怎么办|活不下去|没意思|心累)", re.I),
-    re.compile(r"(感觉|觉得).{0,4}(活不下去|撑不下去|没意思|没动力|好痛苦|很丧)", re.I),
-)
 
-# 关系回访 / 「还记得吗」
-_RELATIONSHIP_PATTERNS = (
-    re.compile(r"(还记得|记得我|认得我|认出我|上次|之前(说|讲|聊)过|你答应过|好久不见|回来了|老粉)", re.I),
-)
+def _load_rule_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
+    """从 rules.json 读各场景的正则并编译，**逐场景经 override**（网页改某场景的
+    关键词即时生效；override 值为一个 JSON 数组字符串）。文件/字段坏 → 内置兜底。"""
+    from ._prompts import load_json_value, get_prompt_overrides, make_json_key
+    raw: dict
+    try:
+        raw = json.loads(_RULES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = _FALLBACK_RULES
+    overrides = get_prompt_overrides()
+    out: dict[str, tuple[re.Pattern[str], ...]] = {}
+    for key, patterns in raw.items():
+        if key.startswith("_") or not isinstance(patterns, list):
+            continue  # 跳过 _comment 等元信息
+        ovk = make_json_key(_RULES_REL, key)
+        if ovk in overrides:  # 网页改了这一场景的关键词（存为 JSON 数组字符串）
+            try:
+                patterns = json.loads(overrides[ovk])
+            except ValueError:
+                pass
+        compiled = []
+        for p in (patterns if isinstance(patterns, list) else []):
+            try:
+                compiled.append(re.compile(str(p), re.I))
+            except re.error:
+                continue  # 单条坏正则跳过
+        out[key] = tuple(compiled)
+    return out
 
-# lina 的兴奋点 —— 古代语 / 遗物 / 戏剧 / 香草 / 甜点 / 炼金 / 魔法石
-_WORLD_IMMERSION_PATTERNS = (
-    re.compile(r"(古代语|古代文字|古文字|古文|楔形|象形|碑文|铭文|手稿|羊皮卷|竹简)", re.I),
-    re.compile(r"(炼金|魔法石|魔法|遗物|古物|文物|符文|圣物|废墟)", re.I),
-    re.compile(r"(戏剧|话剧|歌剧|戏本|台词|莎士比亚|希腊悲剧)", re.I),
-    re.compile(r"(香草|草药|薄荷|薰衣草|迷迭香|百里香|鼠尾草|甘草|药草)", re.I),
-    re.compile(r"(甜点|糕点|布丁|蛋糕|司康|果酱|蜂蜜)", re.I),
-)
 
-# 问她自己 —— 性格 / 经历 / 来历 / 世界观位置
-_SELF_INTROSPECTION_PATTERNS = (
-    re.compile(r"(你是谁|你是个什么样的人|介绍一下你自己|讲讲你自己|聊聊你自己|你性格|你脾气|你喜欢什么|你害怕什么)", re.I),
-    re.compile(r"(你从哪里来|你哪里来的|你出身|你的过去|你小时候|你以前|你怎么成为|你怎么变成)", re.I),
-    re.compile(r"(你的世界|你那个世界|你所在的世界|你那里的)", re.I),
-)
+_RULE_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {}
+_GREETING_PATTERNS: tuple = ()
+_FAREWELL_PATTERNS: tuple = ()
+_SHORT_REACTION_PATTERNS: tuple = ()
+_MODERN_ACTION_PATTERNS: tuple = ()
+_USER_VENT_PATTERNS: tuple = ()
+_RELATIONSHIP_PATTERNS: tuple = ()
+_WORLD_IMMERSION_PATTERNS: tuple = ()
+_SELF_INTROSPECTION_PATTERNS: tuple = ()
+
+
+def reload_rule_patterns() -> None:
+    """重新从 rules.json + override 层加载并编译正则。网页改了规则后调一次即生效。"""
+    global _RULE_PATTERNS, _GREETING_PATTERNS, _FAREWELL_PATTERNS, _SHORT_REACTION_PATTERNS
+    global _MODERN_ACTION_PATTERNS, _USER_VENT_PATTERNS, _RELATIONSHIP_PATTERNS
+    global _WORLD_IMMERSION_PATTERNS, _SELF_INTROSPECTION_PATTERNS
+    _RULE_PATTERNS = _load_rule_patterns()
+    _GREETING_PATTERNS = _RULE_PATTERNS.get("greeting", ())
+    _FAREWELL_PATTERNS = _RULE_PATTERNS.get("farewell", ())
+    _SHORT_REACTION_PATTERNS = _RULE_PATTERNS.get("short_reaction", ())
+    _MODERN_ACTION_PATTERNS = _RULE_PATTERNS.get("modern_action", ())
+    _USER_VENT_PATTERNS = _RULE_PATTERNS.get("user_vent", ())
+    _RELATIONSHIP_PATTERNS = _RULE_PATTERNS.get("relationship_recall", ())
+    _WORLD_IMMERSION_PATTERNS = _RULE_PATTERNS.get("world_immersion", ())
+    _SELF_INTROSPECTION_PATTERNS = _RULE_PATTERNS.get("self_introspection", ())
+
+
+reload_rule_patterns()  # 启动时加载一次
 
 
 # 超过这个间隔（秒）用户才回来，算「久别重逢」，走 welcome_back。
