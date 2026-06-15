@@ -40,11 +40,20 @@ from .config import (
     resolve_proactive_pacing,
     resolve_secret_key,
 )
-from .controller import LinaController, build_default_controller
+from .controller import (
+    LinaController,
+    build_default_controller,
+    read_prompt_file,
+    read_json_value,
+    make_json_key,
+    reload_rule_patterns,
+    set_prompt_overrides,
+)
 from .conversation import Conversation, ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
 from .self_facts import SelfFactsStore
+from .user_facts import UserFactsStore
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
@@ -74,6 +83,29 @@ _admin_users = resolve_admin_users()
 _user_store = UserStore(USERS_FILE)
 # 莉娜对每个用户的「自我事实清单」（跨会话共享，按 user_id 存）。
 _self_facts_store = SelfFactsStore(USERS_FILE.parent / "self_facts")
+# 「用户事实清单」——记用户讲过的、关于他自己的稳定事实（跨会话共享，按 user_id 存）。
+# 解决「聊久了把用户的事忘了/记混/编造」。
+_user_facts_store = UserFactsStore(USERS_FILE.parent / "user_facts")
+
+
+def _spawn_user_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
+    """后台线程：把刚滑出窗口的几轮里**用户**讲过的稳定事实概括进用户事实清单。"""
+    if not user_id or not slid_turns:
+        return
+    ctrl = _ensure_controller()
+    if ctrl is None or not ctrl.has_llm:
+        return
+
+    def _work():
+        try:
+            base = _user_facts_store.load(user_id) or current_facts
+            updated = ctrl.update_user_facts_sync(base, slid_turns)
+            if updated is not None:
+                _user_facts_store.save(user_id, updated)
+        except Exception:
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def _spawn_self_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
@@ -185,11 +217,85 @@ PROMPT_COMPONENTS: list[tuple[str, str, str, str]] = [
     ("personality.md", "人格问卷", "file", "RAG 检索：与用户话题相关时才出现。"),
     ("hobbies.md", "兴趣偏好", "file", "RAG 检索。"),
     ("others.md", "其他角色", "file", "RAG 检索。"),
-    ("BEHAVIOR_RULES", "行为规则", "code", "代码常量。系统提示里的核心约束。"),
-    ("MOOD_FORMAT_SPEC", "情绪标记格式", "code", "代码常量。决定 [mood: …] 的输出格式。"),
+    ("BEHAVIOR_RULES", "行为规则", "code", "主模型：系统提示里的核心约束。"),
+    ("MOOD_FORMAT_SPEC", "情绪标记格式", "code", "主模型：决定 [mood: …] 的输出格式。"),
     ("SYSTEM_PROMPT_TEMPLATE", "系统提示模板", "code",
-     "代码常量。包含占位符 {core_text} / {behavior_rules} / {mood_format_spec}。"),
+     "主模型：包含占位符 {core_text} / {behavior_rules} / {mood_format_spec}，以及 controller 填充位说明。"),
+    ("SEGMENT_PROTOCOL_SPEC", "分段说话机制", "code", "主模型：决定何时把回复拆成多小段。"),
+    ("PROACTIVE_INSTRUCTION", "主动发言·开口指令", "code", "用户沉默时让莉娜主动开口的指令。"),
+    ("FAREWELL_INSTRUCTION", "主动发言·告别指令", "code", "连续没回应后让莉娜自然收束的指令。"),
+    ("CONTINUE_INSTRUCTION", "续说·展开指令", "code", "把没说完的要点展开成一小段的指令（含 {point} 占位）。"),
+
+    # —— controller 侧（按场景注入的 prompt，key = prompts/ 下相对路径）——
+    # few-shot 示例库（controller 按场景挑）
+    ("controller/fewshot/typo_tolerance.txt", "few-shot·错字容错", "controller", "用户打错字时怎么领会的范例。"),
+    ("controller/fewshot/no_trailing_question.txt", "few-shot·别连环提问", "controller", "抑制句尾连甩问号的范例。"),
+    ("controller/fewshot/positive_response.txt", "few-shot·报喜回应", "controller", "用户报喜时替他高兴、不浇冷水的范例。"),
+    ("controller/fewshot/comfort.txt", "few-shot·安抚", "controller", "用户低落时先接情绪的范例。"),
+    ("controller/fewshot/modern_boundary.txt", "few-shot·现代边界", "controller", "现代请求时茫然以对的范例。"),
+    # 差异化场景模块
+    ("modules/user_vent.txt", "模块·安抚陪伴", "controller", "安抚场景注入。"),
+    ("modules/action_boundary.txt", "模块·知识边界", "controller", "现代请求/AI自指场景注入。"),
+    ("modules/world_immersion.txt", "模块·兴奋点沉浸", "controller", "古代语/遗物/戏剧/香草场景注入。"),
+    ("modules/relationship_recall.txt", "模块·关系回访", "controller", "“还记得吗/上次”场景注入。"),
+    ("modules/self_introspection.txt", "模块·自我反思", "controller", "问她身份/性格/来历场景注入。"),
+    ("modules/welcome_back.txt", "模块·久别重逢", "controller", "用户隔了较久回来时注入。"),
+    ("modules/continuation.txt", "模块·续说", "controller", "把没说完的段接着说时注入。"),
+    ("modules/hook_concrete_example.txt", "模块·具体细节钩子", "controller", "要求带专名/场景细节。"),
+    ("modules/hook_callback.txt", "模块·回勾话头", "controller", "回勾最近未聊完的话头。"),
+    ("modules/hook_history_recall.txt", "模块·引用历史", "controller", "引用用户讲过的事。"),
+    # controller 专用模板
+    ("controller/proactive_topic.txt", "主动发言·挑话头", "controller", "用户沉默时挑哪个话头主动开口。"),
+    ("controller/self_facts.txt", "自我清单·提炼规则", "controller", "把莉娜说过的自我事实概括进清单的规则。"),
+    ("controller/control_flag.txt", "微顾问·布尔判官模板", "controller", "每个布尔字段微顾问的 prompt 模板。"),
+    ("controller/control_int.txt", "微顾问·数值判官模板", "controller", "数值字段微顾问的 prompt 模板。"),
+    ("controller/control_text.txt", "微顾问·文本判官模板", "controller", "文本字段微顾问的 prompt 模板。"),
 ]
+# 主模型 4 个 prompt 现在也是文件（prompts/main/），override 仍按这些 KEY 走
+# character 的 overrides 机制；它们与文件的映射：
+_MAIN_PROMPT_FILES = {
+    "BEHAVIOR_RULES": "main/behavior_rules.txt",
+    "MOOD_FORMAT_SPEC": "main/mood_format_spec.txt",
+    "SYSTEM_PROMPT_TEMPLATE": "main/system_prompt_template.txt",
+    "SEGMENT_PROTOCOL_SPEC": "main/segment_protocol_spec.txt",
+    "PROACTIVE_INSTRUCTION": "main/proactive_instruction.txt",
+    "FAREWELL_INSTRUCTION": "main/farewell_instruction.txt",
+    "CONTINUE_INSTRUCTION": "main/continue_instruction.txt",
+}
+
+
+def _generate_json_components() -> list[tuple[str, str, str, str]]:
+    """把 4 个结构化 JSON 拆成细粒度可编辑组件（key = 'file#dotpath'）。
+    读 JSON 自动生成，加新规则只需改 JSON、无需改这里。"""
+    import json as _json
+    specs = [
+        ("controller/advisor_rules.json", "微顾问规则", "advisor", ["target_desc", "decision_rules", "range_desc"]),
+        ("controller/rules.json", "规则层关键词", "rule", None),          # 每个场景一条（值是数组）
+        ("controller/proactive_stages.json", "主动发言策略", "stage", None),  # 每个 stage 一条
+        ("controller/constraints.json", "本轮约束句", "constraint", None),    # 每条约束一条
+    ]
+    comps: list[tuple[str, str, str, str]] = []
+    base = PROJECT_ROOT / "prompts"
+    for rel, label_prefix, source, subfields in specs:
+        try:
+            data = _json.loads((base / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for top_key, val in data.items():
+            if top_key.startswith("_"):
+                continue
+            if subfields and isinstance(val, dict):
+                # advisor：每个子字段一条
+                for sf in subfields:
+                    if sf in val:
+                        comps.append((f"{rel}#{top_key}.{sf}",
+                                      f"{label_prefix}·{top_key}·{sf}", source, f"{rel} 里 {top_key}.{sf}"))
+            else:
+                comps.append((f"{rel}#{top_key}", f"{label_prefix}·{top_key}", source, f"{rel} 里 {top_key}"))
+    return comps
+
+
+PROMPT_COMPONENTS += _generate_json_components()
 _PROMPT_KEYS = {k for k, _, _, _ in PROMPT_COMPONENTS}
 
 OVERRIDES_DIR = PROJECT_ROOT / "prompt_overrides"
@@ -378,6 +484,16 @@ def _save_overrides_to_disk(d: dict[str, str]) -> None:
     )
 
 
+def _sync_controller_overrides() -> None:
+    """把 _overrides 里属于 controller（key 含 '/' 的相对路径）的项，
+    推到 controller 的全局 override 层，让 load_prompt 即时生效。
+    主模型 4 个 KEY 不在此处——它们经 character 的 overrides 机制走。"""
+    ctrl_ov = {k: v for k, v in _overrides.items() if "/" in k}
+    set_prompt_overrides(ctrl_ov)
+    # 规则层正则在 import 时已编译进模块全局，需显式重载才能让 override 生效。
+    reload_rule_patterns()
+
+
 def _match_default_version() -> dict | None:
     """If the active global default (`_overrides`) exactly equals some saved
     version's overrides, return that version's {version_id, name}; else None
@@ -412,14 +528,30 @@ def _sanitize_forced_state(fs: dict) -> dict:
 
 
 def _default_value(key: str) -> str:
+    # 静态人设 .md（在 static/）
     if key.endswith(".md"):
         fpath = STATIC_DIR / key
         return fpath.read_text(encoding="utf-8") if fpath.exists() else ""
-    return {
-        "BEHAVIOR_RULES": character_mod.BEHAVIOR_RULES,
-        "MOOD_FORMAT_SPEC": character_mod.MOOD_FORMAT_SPEC,
-        "SYSTEM_PROMPT_TEMPLATE": character_mod.SYSTEM_PROMPT_TEMPLATE,
-    }.get(key, "")
+    # 主模型 4 个 prompt：现在是 prompts/main/ 下的文件
+    if key in _MAIN_PROMPT_FILES:
+        return read_prompt_file(_MAIN_PROMPT_FILES[key])
+    # JSON 细粒度字段：key = "rel_path#dotpath"
+    if "#" in key:
+        rel, dotpath = key.split("#", 1)
+        # rules.json 的场景值是数组 → 以 JSON 数组字符串呈现给编辑器
+        import json as _json
+        try:
+            data = _json.loads((PROJECT_ROOT / "prompts" / rel).read_text(encoding="utf-8"))
+            cur = data
+            for part in dotpath.split("."):
+                cur = cur[part]
+            return cur if isinstance(cur, str) else _json.dumps(cur, ensure_ascii=False, indent=2)
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+    # controller 侧整文件：key 本身就是 prompts/ 下的相对路径
+    if "/" in key:
+        return read_prompt_file(key)
+    return ""
 
 
 def _client_ready(cid: str | None) -> bool:
@@ -609,6 +741,8 @@ def _pop_engines_with_suffix(suffix: str) -> None:
 def _invalidate_current_engine() -> None:
     """Drop every client's engine using the editable global overrides."""
     _pop_engines_with_suffix("\x00" + _CURRENT_KEY)
+    # 全局 override 变了 → 同步 controller 的 load_prompt override 层（即时生效）。
+    _sync_controller_overrides()
 
 
 def _invalidate_engine(version_id: str) -> None:
@@ -642,6 +776,7 @@ def create_app() -> Flask:
     # Load any persisted overrides from the gitignored local folder.
     global _overrides
     _overrides = _load_overrides_from_disk()
+    _sync_controller_overrides()  # 启动即把已保存的 controller override 注册进 load_prompt
 
     # Build the shared controller eagerly so any startup error (bad OpenAI
     # key, missing dep) shows in the server log, not on the first chat.
@@ -1041,19 +1176,21 @@ def create_app() -> Flask:
         extra_memory = _cross_session_memory(cid, session_id, message)
         # 莉娜的自我事实清单（按 user_id 跨会话共享）——注入让她对自己说过的话一致。
         self_facts = _self_facts_store.load(cid)
+        # 用户事实清单——注入让她记得用户是谁、聊过什么（跨上百轮不忘/不混/不编）。
+        user_facts = _user_facts_store.load(cid)
 
         try:
             result = engine.chat(
                 conv, message, extra_memory_chunks=extra_memory,
-                quoted_text=quoted_text, self_facts=self_facts,
+                quoted_text=quoted_text, self_facts=self_facts, user_facts=user_facts,
             )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
-        # 自我事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
-        # 概括的是旧对话，晚一两秒、下一轮生效完全无妨。
+        # 自我/用户事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
         if result.slid_out_turns:
             _spawn_self_facts_update(cid, dict(self_facts or {}), list(result.slid_out_turns))
+            _spawn_user_facts_update(cid, dict(user_facts or {}), list(result.slid_out_turns))
 
         return jsonify(
             {
@@ -1174,6 +1311,7 @@ def create_app() -> Flask:
         # 莉娜主动讲的（尤其自己的经历）也记进自我事实清单（后台异步）。
         if result.slid_out_turns:
             _spawn_self_facts_update(cid, dict(_self_facts_store.load(cid)), list(result.slid_out_turns))
+            _spawn_user_facts_update(cid, dict(_user_facts_store.load(cid)), list(result.slid_out_turns))
 
         # 真正是不是告别，由后端权威计数决定（可能覆盖了请求的 mode）。读最后一条
         # assistant 的 meta 为准，让前端据此停止后续主动。

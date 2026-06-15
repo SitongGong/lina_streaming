@@ -1,0 +1,14 @@
+{
+  "_comment": "Plan→本轮约束句 的文字模板。composer 按 Plan 的各 flag 选择拼入。{} 是占位符（sentences/max_reply_chars/tone_hint/max_segments），改文字不动代码。",
+  "header": "【本轮回复约束】",
+  "sentences": "- 句数（每行 = 1 口气）：{sentences} 行左右",
+  "max_reply_chars": "- 总字数上限：{max_reply_chars}",
+  "tone_hint": "- 语气：{tone_hint}",
+  "mood_continuity": "- mood 与上一轮连贯，不要突变（除非用户做了明显冒犯或惊喜的事）",
+  "no_doubt_wrap": "- 本轮不要用「我也不太确定 / 让我想想」开头；直接温柔或坦率地接",
+  "no_segment": "- 本轮**不要分段**（不输出 [segments:…]），一口气把话说完即可。",
+  "allow_segment": "- 本轮**如果有多个意思**可以分段说：第一段先发，其余写进 [segments:…]，最多 {max_segments} 段；只有一个意思就别硬凑。",
+  "suppress_question_excited": "- 你对这个话题很感兴趣，可以追问——但**一条消息里最多一个问号**，别第一段就连甩两三个问句像审问。先给一句你自己的真反应/感想，再问那一个最想问的。",
+  "suppress_question_default": "- 本轮**不要在结尾硬甩问句**：可以陈述、附和、分享自己类似的经历来接住话，不必每条都用问号收尾。真有想问的，**最多问一个**，别连珠炮追问、别为了显得在互动而凑问句。",
+  "lenient_typos": "- 用户可能有错别字/漏字/拼音/同音字：**按最通顺合理的意思去理解**，自然接住，就当对方本来要说的是那个意思。**不要揪着明显的笔误反复追问、纠错、或当成没听过的怪词**。只有整句确实无法推断时才轻描淡写确认一次。"
+}
