@@ -53,6 +53,7 @@ from .conversation import Conversation, ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
 from .self_facts import SelfFactsStore
+from .user_facts import UserFactsStore
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
@@ -82,6 +83,29 @@ _admin_users = resolve_admin_users()
 _user_store = UserStore(USERS_FILE)
 # 莉娜对每个用户的「自我事实清单」（跨会话共享，按 user_id 存）。
 _self_facts_store = SelfFactsStore(USERS_FILE.parent / "self_facts")
+# 「用户事实清单」——记用户讲过的、关于他自己的稳定事实（跨会话共享，按 user_id 存）。
+# 解决「聊久了把用户的事忘了/记混/编造」。
+_user_facts_store = UserFactsStore(USERS_FILE.parent / "user_facts")
+
+
+def _spawn_user_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
+    """后台线程：把刚滑出窗口的几轮里**用户**讲过的稳定事实概括进用户事实清单。"""
+    if not user_id or not slid_turns:
+        return
+    ctrl = _ensure_controller()
+    if ctrl is None or not ctrl.has_llm:
+        return
+
+    def _work():
+        try:
+            base = _user_facts_store.load(user_id) or current_facts
+            updated = ctrl.update_user_facts_sync(base, slid_turns)
+            if updated is not None:
+                _user_facts_store.save(user_id, updated)
+        except Exception:
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def _spawn_self_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
@@ -1152,19 +1176,21 @@ def create_app() -> Flask:
         extra_memory = _cross_session_memory(cid, session_id, message)
         # 莉娜的自我事实清单（按 user_id 跨会话共享）——注入让她对自己说过的话一致。
         self_facts = _self_facts_store.load(cid)
+        # 用户事实清单——注入让她记得用户是谁、聊过什么（跨上百轮不忘/不混/不编）。
+        user_facts = _user_facts_store.load(cid)
 
         try:
             result = engine.chat(
                 conv, message, extra_memory_chunks=extra_memory,
-                quoted_text=quoted_text, self_facts=self_facts,
+                quoted_text=quoted_text, self_facts=self_facts, user_facts=user_facts,
             )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
-        # 自我事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
-        # 概括的是旧对话，晚一两秒、下一轮生效完全无妨。
+        # 自我/用户事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
         if result.slid_out_turns:
             _spawn_self_facts_update(cid, dict(self_facts or {}), list(result.slid_out_turns))
+            _spawn_user_facts_update(cid, dict(user_facts or {}), list(result.slid_out_turns))
 
         return jsonify(
             {
@@ -1285,6 +1311,7 @@ def create_app() -> Flask:
         # 莉娜主动讲的（尤其自己的经历）也记进自我事实清单（后台异步）。
         if result.slid_out_turns:
             _spawn_self_facts_update(cid, dict(_self_facts_store.load(cid)), list(result.slid_out_turns))
+            _spawn_user_facts_update(cid, dict(_user_facts_store.load(cid)), list(result.slid_out_turns))
 
         # 真正是不是告别，由后端权威计数决定（可能覆盖了请求的 mode）。读最后一条
         # assistant 的 meta 为准，让前端据此停止后续主动。

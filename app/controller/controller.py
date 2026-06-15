@@ -196,6 +196,60 @@ class LinaController:
             )
             return None
 
+    def update_user_facts_sync(
+        self, current_facts: dict, sliding_turns: list[tuple[str, str]]
+    ) -> dict | None:
+        """Sync wrapper for update_user_facts。"""
+        return asyncio.run(self.update_user_facts(current_facts, sliding_turns))
+
+    async def update_user_facts(
+        self, current_facts: dict, sliding_turns: list[tuple[str, str]]
+    ) -> dict | None:
+        """用 LLM 把「即将滑出窗口的几轮」里**用户**讲过的、关于用户自己的稳定事实，
+        概括/合并进用户事实清单。返回更新后的分桶 dict；无 client/出错/空 → None。
+
+        和 update_self_facts 对称，只是概括对象是**用户**（不是莉娜），用 user_facts.txt。
+        """
+        if self._client is None or not sliding_turns:
+            return None
+        import json as _json
+        from ._prompts import load_prompt
+        from .experts import _parse_json_object
+
+        template = load_prompt("controller/user_facts.txt")
+        if not template:
+            return None
+        lines: list[str] = []
+        for u, a in sliding_turns:
+            if (u or "").strip():
+                lines.append(f"用户说：{str(u).strip()[:160]}")
+            if (a or "").strip():
+                lines.append(f"莉娜说：{str(a).strip()[:160]}")
+        sliding_text = "\n".join(lines) if lines else "(无)"
+        prompt = template.format(
+            sliding_text=sliding_text,
+            current_facts=_json.dumps(current_facts or {}, ensure_ascii=False),
+        )
+        try:
+            resp = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_completion_tokens=900,
+                    reasoning_effort="minimal",
+                    response_format={"type": "json_object"},
+                ),
+                timeout=float(os.environ.get("LINA_SELF_FACTS_TIMEOUT") or _SELF_FACTS_TIMEOUT),
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = _parse_json_object(raw)
+            return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "update_user_facts failed: %s", f"{type(exc).__name__}: {exc}".rstrip(": ")
+            )
+            return None
+
     def pick_proactive_topic_sync(
         self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
     ) -> dict[str, Any]:

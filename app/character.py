@@ -346,6 +346,7 @@ class CharacterEngine:
         is_first_turn: bool = False,
         quoted_text: str = "",
         self_facts_text: str = "",
+        user_facts_text: str = "",
         pending_segments: list[str] | None = None,
     ) -> str:
         sections: list[str] = []
@@ -390,6 +391,17 @@ class CharacterEngine:
                 "<莉娜的自我设定记忆 — 你（莉娜）之前亲口说过的、与本轮相关的关于你自己的事实。"
                 "务必与这些保持一致，不要自相矛盾；自然引用即可，不要生硬复述。>\n"
                 f"{self_facts_text}\n</莉娜的自我设定记忆>"
+            )
+
+        # 「用户事实清单」命中项——用户在过往（可能很多轮前、已滑出窗口）讲过的、
+        # 关于他自己的稳定事实。这是解决「聊久了把用户的事忘了/记混/编造」的关键：
+        # 按当前话题 BM25 检出相关几条注入，让莉娜记得用户是谁、聊过什么。
+        if user_facts_text:
+            sections.append(
+                "<关于用户的记忆 — 用户之前讲过的、关于他自己的事实（可能是很久以前说的）。"
+                "请把这些当作你确实记得的事，自然地体现出「记得他」；但**只用这里列出的**，"
+                "不要凭印象编造用户没说过的事，也不要生硬复述。>\n"
+                f"{user_facts_text}\n</关于用户的记忆>"
             )
 
         if retrieved:
@@ -444,6 +456,7 @@ class CharacterEngine:
         extra_memory_chunks: list[Chunk] | None = None,
         quoted_text: str = "",
         self_facts: dict | None = None,
+        user_facts: dict | None = None,
     ) -> dict:
         """Shared setup for chat() and chat_stream(): controller dispatch,
         plan-driven RAG, mood seeding, the assembled API `messages` list, and
@@ -468,6 +481,20 @@ class CharacterEngine:
                 self_facts_text = SelfFactsStore.search(self_facts, rag_query, k=5)
             except Exception:
                 self_facts_text = ""
+        # 用户事实清单：长期记住用户的核心。清单本就很短（上限 ~40 条），所以
+        # **较短时整份注入**（不靠 BM25），避免「换个说法问就检不到」——让主模型
+        # 自己从完整清单里找。只有清单异常大时才退回 BM25 检索控量。
+        user_facts_text = ""
+        if user_facts:
+            try:
+                from .user_facts import UserFactsStore
+                total = sum(len(v) for v in user_facts.values() if isinstance(v, list))
+                if total <= 40:
+                    user_facts_text = UserFactsStore.render(user_facts)   # 整份注入
+                else:
+                    user_facts_text = UserFactsStore.search(user_facts, rag_query, k=10)
+            except Exception:
+                user_facts_text = ""
         retrieve_k = plan.retrieve_k if self._controller is not None else self.retrieve_k
         retrieved_raw = self.rag.retrieve(rag_query, k=retrieve_k) if retrieve_k > 0 else []
         retrieved = (
@@ -529,6 +556,7 @@ class CharacterEngine:
                     is_first_turn=is_first_turn,
                     quoted_text=quoted_text,
                     self_facts_text=self_facts_text,
+                    user_facts_text=user_facts_text,
                     # 上一轮 park 下来、还没说完的段（用户这轮插话）。交给主模型
                     # 自己判断接不接（见 _build_user_content）。仅 controller 模式下启用，
                     # 避免无 controller 的简单模式行为变化。
@@ -576,6 +604,7 @@ class CharacterEngine:
         extra_memory_chunks: list[Chunk] | None = None,
         quoted_text: str = "",
         self_facts: dict | None = None,
+        user_facts: dict | None = None,
     ) -> ChatResult:
         prep = self._prepare(
             conversation,
@@ -583,6 +612,7 @@ class CharacterEngine:
             extra_memory_chunks=extra_memory_chunks,
             quoted_text=quoted_text,
             self_facts=self_facts,
+            user_facts=user_facts,
         )
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
@@ -639,7 +669,7 @@ class CharacterEngine:
             slid_out_turns=slid_out,
         )
 
-    def chat_stream(self, conversation: Conversation, user_message: str, self_facts: dict | None = None):
+    def chat_stream(self, conversation: Conversation, user_message: str, self_facts: dict | None = None, user_facts: dict | None = None):
         """Streaming counterpart to chat(). A generator yielding event dicts:
 
             {"type": "mood",  "mood": {...}|None}   — emitted once, as soon as
@@ -656,7 +686,7 @@ class CharacterEngine:
         aborting the Anthropic request, and nothing is saved. That matches the
         product rule: a barged-in turn is treated as a mistake and discarded.
         """
-        prep = self._prepare(conversation, user_message, self_facts=self_facts)
+        prep = self._prepare(conversation, user_message, self_facts=self_facts, user_facts=user_facts)
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
