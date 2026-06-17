@@ -16,3 +16,5 @@ certs/
 users/
 *.bak
 conversations/users/
+sess-*.json
+.vscode/

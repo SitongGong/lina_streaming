@@ -1500,6 +1500,10 @@
   <span class="proactive-config" id="proactive-config" title="首次间隔=第一次主动开口前等多久（之后每次按退避逐渐拉长，且带随机抖动）；上限=连续未回应到第几次时改为告别并停止。">
     首次<input type="number" id="proactive-interval" min="5" max="600" step="1">秒·共<input type="number" id="proactive-max-nudges" min="1" max="20" step="1">次后告别
   </span>
+  <label class="proactive-toggle" id="merged-controller-toggle" title="勾选=用合并版 controller（4 个 advisor，更快、P95 尾延迟更低）；不勾=原版（20 个 advisor）。**仅对你自己生效**，不影响别人；下一轮对话起效。">
+    <input type="checkbox" id="merged-controller-checkbox">
+    <span>合并advisor(提速)</span>
+  </label>
   <div class="grow"></div>
   <span class="prompt-version-chip" id="default-prompt-chip" title="当前全局默认提示词版本（共享会话使用）">默认: —</span>
   <div class="user-chip" id="user-chip">
@@ -1824,6 +1828,9 @@ async function refreshStatus() {
     state.ready = !!s.ready;
     state.is_admin = !!s.is_admin;
     applyAdminVisibility();
+    // 同步「合并 advisor」开关的当前状态
+    const mc = $('merged-controller-checkbox');
+    if (mc && s.controller) mc.checked = !!s.controller.merged;
     $('status-dot').classList.toggle('ready', !!s.ready);
     $('status-dot').title = s.ready ? '已连接' : (s.logged_in ? '已登录·待连接 Key' : '未登录');
     // 当前全局默认提示词版本（与某个已保存版本完全一致时显示其名字，否则「自定义」）。
@@ -2424,7 +2431,9 @@ async function send() {
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
     // 用户主动告别 → 温和收束后不再主动发言，直到用户下次开口。
-    if (data.plan && data.plan.matched_rule === 'plain_farewell') {
+    // 认 plan.user_farewell（规则层"拜拜"或 LLM 判出的长句告别意图都算），
+    // 不再只认 matched_rule==plain_farewell（那只命中纯"拜拜"短句）。
+    if (data.plan && data.plan.user_farewell) {
       state.conversationEnded = true;
     }
     await loadSessions();
@@ -2625,6 +2634,7 @@ document.querySelectorAll('.tab').forEach(t => {
 function applyAdminVisibility() {
   const tab = document.querySelector('.tab[data-view="feedback"]');
   if (tab) tab.style.display = state.is_admin ? '' : 'none';
+  // 合并 advisor 开关：所有人可见可切（供测试者体验提速）
   if (!state.is_admin) {
     const fv = document.getElementById('view-feedback');
     if (fv && fv.classList.contains('active')) switchView('chat');
@@ -4106,6 +4116,26 @@ async function runProactive() {
 $('proactive-checkbox').addEventListener('change', (e) => setProactivePref(e.target.checked));
 $('proactive-interval').addEventListener('change', (e) => setProactiveInterval(e.target.value));
 $('proactive-max-nudges').addEventListener('change', (e) => setProactiveMaxNudges(e.target.value));
+$('merged-controller-checkbox')?.addEventListener('change', async (e) => {
+  const merged = e.target.checked;
+  try {
+    const r = await api('/api/controller_mode', { method: 'POST', body: JSON.stringify({ merged }) });
+    if (r && r.ok) {
+      toast('已切换（仅你自己）：' + r.mode + '，下一轮起效');
+    } else {
+      e.target.checked = !merged;  // 失败回滚
+      toast('切换失败：' + ((r && r.error) || '未知'));
+    }
+  } catch (err) {
+    e.target.checked = !merged;
+    toast('切换失败：' + err.message);
+  } finally {
+    // 防御：切换 + 清引擎池可能撞上 in-flight 请求导致发送状态卡死 → 强制复位，
+    // 保证切换后还能正常发消息。
+    state.sending = false;
+    const sb = document.getElementById('send-btn'); if (sb) sb.disabled = false;
+  }
+});
 $('quote-bar-clear').addEventListener('click', clearQuote);
 // 只有「真的在打字」才算用户还在场、刷新闲置计时（发消息在 send() 里另算）。
 // 故意不监听 focus / 窗口 focus —— 点一下输入框、切回来看一眼，都不该

@@ -49,6 +49,7 @@ from .controller import (
     reload_rule_patterns,
     set_prompt_overrides,
 )
+from .controller.merged_controller import MergedController
 from .conversation import Conversation, ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
 from .rag import retrieve_user_memory_chunks
@@ -186,24 +187,55 @@ _PUBLIC_API_PATHS = {
 # Shared per-turn decision controller (rule layer + gpt-5-mini advisors).
 # Stateless config — safe to share across all clients. Built once from
 # OPENAI_API_KEY; `None`-LLM fallback is fine (rules-only still works).
-_controller: LinaController | None = None
+_controller: LinaController | None = None            # 原版（20 路并发 advisor）
+_controller_merged: LinaController | None = None     # 合并版（4 组 advisor，提速实验）
+# 「合并 advisor」开关——**按用户独立**：集合里有该 user_id = 该用户用合并版(4 advisor)，
+# 否则用原版(20 advisor)。A 用合并版、B 同时用原版，互不影响。
+_merged_users: set[str] = set()
+# controller 专用锁——**不能用 _engine_lock**：_ensure_controller 会在
+# _engine_for_session 已持有 _engine_lock 时被调用，复用同一把（非重入）锁会自锁死。
+_controller_lock = threading.Lock()
+
+
+def _user_uses_merged(cid: str | None) -> bool:
+    return bool(cid) and cid in _merged_users
+
+
+def _build_original_controller() -> LinaController:
+    global _controller
+    if _controller is None:
+        with _controller_lock:
+            if _controller is None:
+                cfg = resolve_controller_settings()
+                _controller = build_default_controller(
+                    api_key=cfg["api_key"], model=cfg["model"],
+                    base_url=cfg["base_url"], provider=cfg["provider"],
+                )
+    return _controller
+
+
+def _build_merged_controller() -> LinaController:
+    global _controller_merged
+    if _controller_merged is None:
+        with _controller_lock:
+            if _controller_merged is None:
+                cfg = resolve_controller_settings()
+                _controller_merged = MergedController(
+                    openai_client=_build_original_controller()._client,
+                    model_name=cfg["model"],
+                )
+    return _controller_merged
+
+
+def _controller_for(cid: str | None) -> LinaController | None:
+    """按用户返回 controller：该用户开了合并版→合并版，否则原版。
+    两个版本都是无状态判断器，各建一个全局实例、所有用户共享，不重复构造。"""
+    return _build_merged_controller() if _user_uses_merged(cid) else _build_original_controller()
 
 
 def _ensure_controller() -> LinaController | None:
-    """Lazily build the shared LinaController. Safe to call repeatedly."""
-    global _controller
-    if _controller is not None:
-        return _controller
-    with _engine_lock:
-        if _controller is None:
-            cfg = resolve_controller_settings()
-            _controller = build_default_controller(
-                api_key=cfg["api_key"],
-                model=cfg["model"],
-                base_url=cfg["base_url"],
-                provider=cfg["provider"],
-            )
-        return _controller
+    """无用户上下文时（后台提炼、启动预建等）用的默认 controller = 原版。"""
+    return _build_original_controller()
 
 # ---------- Prompt-override layer ----------
 # Editable from the web UI. Stored locally (gitignored), reapplied on
@@ -661,7 +693,10 @@ def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
     creds = _client_creds.get(cid)
     if not creds:
         return None
-    key = cid + "\x00" + _engine_base_key(conv)
+    # key 带上 controller 标记：同一用户切换 merged 会用不同 engine，
+    # 不同用户用不同 controller 也不会共用同一个 engine（避免串扰）。
+    ctrl_tag = "merged" if _user_uses_merged(cid) else "orig"
+    key = cid + "\x00" + _engine_base_key(conv) + "\x00" + ctrl_tag
     with _engine_lock:
         engine = _engine_pool.get(key)
         if engine is not None:
@@ -671,7 +706,7 @@ def _engine_for_session(conv, cid: str) -> CharacterEngine | None:
             static_dir=STATIC_DIR,
             model=creds["model"],
             overrides=_effective_overrides_for(conv),
-            controller=_ensure_controller(),
+            controller=_controller_for(cid),   # 按该用户选原版/合并版
         )
         _engine_pool[key] = engine
         return engine
@@ -855,11 +890,32 @@ def create_app() -> Flask:
                 "controller": {
                     "enabled": ctrl is not None,
                     "has_llm": bool(ctrl and ctrl.has_llm),
+                    "merged": _user_uses_merged(uid),   # 该用户是否用合并版（4 advisor）
                 },
                 "proactive_pacing": resolve_proactive_pacing(),
                 "default_prompt": _match_default_version(),
             }
         )
+
+    @app.route("/api/controller_mode", methods=["POST"])
+    def controller_mode():
+        """切换当前用户的 controller：合并版(4 advisor) ↔ 原版(20 advisor)。
+        **仅对该用户生效**，不影响别人。切换只清该用户的 engine（让其按新 controller 重建）。"""
+        cid = session.get("user_id")
+        if not cid:
+            return jsonify({"ok": False, "error": "请先登录"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        merged = bool(data.get("merged", False))
+        if merged:
+            _merged_users.add(cid)
+        else:
+            _merged_users.discard(cid)
+        # 只清该用户的 engine（key 以 "<cid>\x00" 开头），不动别人。
+        with _engine_lock:
+            for k in [k for k in _engine_pool if k.startswith(cid + "\x00")]:
+                _engine_pool.pop(k, None)
+        mode = "合并版(4 advisor)" if merged else "原版(20 advisor)"
+        return jsonify({"ok": True, "merged": merged, "mode": mode})
 
     @app.route("/api/auth", methods=["POST"])
     def auth():
@@ -1300,15 +1356,18 @@ def create_app() -> Flask:
         engine = _engine_for_session(conv, cid)
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
+        proactive_user_facts = _user_facts_store.load(cid)   # 参考用户长期记忆
+        proactive_self_facts = _self_facts_store.load(cid)   # 参考莉娜自己的设定，避免自相矛盾
         try:
             if mode == "farewell":
-                result = engine.proactive_farewell(conv)
+                result = engine.proactive_farewell(conv, user_facts=proactive_user_facts, self_facts=proactive_self_facts)
             else:
-                result = engine.proactive(conv)
+                result = engine.proactive(conv, user_facts=proactive_user_facts, self_facts=proactive_self_facts)
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
-        # 莉娜主动讲的（尤其自己的经历）也记进自我事实清单（后台异步）。
+        # 注意：主动发言的内容**不再喂进记忆清单**（_run_proactive 已返回空 slid_out），
+        # 避免即兴话头污染记忆 / 与之前说过的冲突。下面这个分支因此基本不触发。
         if result.slid_out_turns:
             _spawn_self_facts_update(cid, dict(_self_facts_store.load(cid)), list(result.slid_out_turns))
             _spawn_user_facts_update(cid, dict(_user_facts_store.load(cid)), list(result.slid_out_turns))

@@ -251,13 +251,16 @@ class LinaController:
             return None
 
     def pick_proactive_topic_sync(
-        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
+        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent",
+        user_facts: dict | None = None,
     ) -> dict[str, Any]:
         """Sync wrapper for pick_proactive_topic."""
-        return asyncio.run(self.pick_proactive_topic(ctx, avoid_hooks=avoid_hooks, stage=stage))
+        return asyncio.run(self.pick_proactive_topic(
+            ctx, avoid_hooks=avoid_hooks, stage=stage, user_facts=user_facts))
 
     async def pick_proactive_topic(
-        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent"
+        self, ctx: LinaTurnContext, avoid_hooks: list[str] | None = None, stage: str = "recent",
+        user_facts: dict | None = None,
     ) -> dict[str, Any]:
         """Pick ONE past thread worth resurfacing for a proactive opener.
 
@@ -288,10 +291,22 @@ class LinaController:
         ) if avoid else "（暂无，自由选择）"
         # 分级策略文字外置到 prompts/controller/proactive_stages.json，改策略不动代码。
         stage_text = _load_proactive_stages().get(stage, "")
+        # 叠加「用户事实清单」——用户长期讲过的稳定事实（可能远早于最近 8 轮），
+        # 让挑话头能从「用户提过但没聊透」的事里挑，弥补只看近 8 轮的局限。
+        user_facts_text = "（暂无）"
+        if user_facts:
+            try:
+                from ..user_facts import UserFactsStore
+                rendered = UserFactsStore.render(user_facts)
+                if rendered.strip():
+                    user_facts_text = rendered
+            except Exception:
+                pass
         prompt = template.format(
             history_text=_render_history(ctx.history, limit=8),
             avoid_text=avoid_text,
             stage_text=stage_text,
+            user_facts_text=user_facts_text,
         )
         try:
             resp = await asyncio.wait_for(
@@ -431,6 +446,7 @@ class LinaController:
             suppress_trailing_question=merged.get("suppress_trailing_question", True),
             lenient_typos=merged.get("lenient_typos", True),
             user_positive=merged.get("user_positive", False),
+            user_farewell=merged.get("user_farewell", False),
             sentences=merged.get("sentences", 2),
             max_reply_chars=merged.get("max_reply_chars", 45),
             allow_segment=merged.get("allow_segment", False),

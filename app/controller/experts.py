@@ -614,6 +614,29 @@ def build_lina_advisors(
             default=False,
             timeout=timeout,
         ),
+        "user_farewell": BoolAdvisor(
+            client,
+            model=model,
+            name="user_farewell",
+            field_name="user_farewell",
+            target_desc=(
+                "用户这轮是否在**主动告别 / 想结束这次对话**——包括直白的，也包括**委婉、间接、"
+                "用「下次/改天」推托的**。重点：**长句里夹着的告别意图也算**。"
+                "直白：'拜拜''晚安''我去睡了'；"
+                "间接：'我还有点事，咱们改天再聊吧''先这样吧''下次再聊''我先忙去了''回头说'"
+                "——这些**都算告别**（用户在用「以后再聊」礼貌地结束当下这次对话）。"
+            ),
+            decision_rules=(
+                "- 用户明确要走/休息/收尾（拜拜、先这样、我去忙了、先睡了）→ true。\n"
+                "- **用「改天/下次/回头/以后」+ 再聊/再说，来推迟或结束当下对话 → true**"
+                "（如'改天再聊''下次聊''回头说'——这是委婉告别，不是定下次约定）。\n"
+                "- 用「我还有点事 / 我得走了 / 先不聊了」表示要离开 → true，哪怕语气客气。\n"
+                "- 哪怕前面还说了别的，只要这轮带着收尾/要走/改天再说的意思 → true。\n"
+                "- 用户还在正常聊、在提问、在倾诉、在约**具体**的下次（'明晚8点聊'）→ false。"
+            ),
+            default=False,
+            timeout=timeout,
+        ),
         "allow_doubt_wrap": BoolAdvisor(
             client,
             model=model,

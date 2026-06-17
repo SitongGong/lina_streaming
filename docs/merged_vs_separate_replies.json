@@ -1,0 +1,742 @@
+[
+  {
+    "id": 1,
+    "场景": "安抚",
+    "用户输入": "我最近压力好大，我那只猫团子也病了，唉",
+    "separate": {
+      "回复": "哎……团子病了啊。\n这两件事赶一起，确实够呛。\n猫没精神的样子，看着就叫人心里难受。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "唉……猫生病是最让人揪心的。\n团子现在怎么了？",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "温柔"
+      }
+    }
+  },
+  {
+    "id": 2,
+    "场景": "低落",
+    "用户输入": "唉感觉做什么都没意思，提不起劲",
+    "separate": {
+      "回复": "唉……这种感觉挺难受的。\n\n不是你的问题，有时候就是会这样。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "嗯……这种感觉挺难受的。\n先歇着吧，不用硬撑。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 3,
+    "场景": "安抚-自我否定",
+    "用户输入": "今天面试搞砸了，感觉自己一无是处",
+    "separate": {
+      "回复": "唉……搞砸了啊。\n这种感觉很难受的，我知道。\n先喘口气，别太苛责自己。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "嗯……这种感觉很难受的。\n搞砸了一次不等于真的一无是处，虽然我知道这话现在说了也不一定管用。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 4,
+    "场景": "安抚-倾诉",
+    "用户输入": "心好累，不想说话，就想找你倾诉下",
+    "separate": {
+      "回复": "嗯……那就不说。\n我在这儿。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "嗯……说吧，我听着。\n不用整理，想到哪说到哪就行。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 5,
+    "场景": "安抚-家庭",
+    "用户输入": "我妈又催婚了，跟我爸吵了一架，烦死了",
+    "separate": {
+      "回复": "唉……家里的事最难躲了。\n先别管他们，喘口气。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "唉，催婚……家里这种事最难说的。\n吵完了人怎么样，还好吗？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 6,
+    "场景": "报喜+吐槽",
+    "用户输入": "我升职了！不过手底下的人难带，头疼",
+    "separate": {
+      "回复": "升职……恭喜啊。\n难带是什么意思，不听话？",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "哦，升职了……那要恭喜你。\n难带是什么意思，不听话？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 7,
+    "场景": "报喜-致谢",
+    "用户输入": "我最近顺利多了，谢谢你之前的建议",
+    "separate": {
+      "回复": "顺利了就好……\n不过你说\"之前的建议\"——我有点没想起来是哪件事？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": true,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    },
+    "merged": {
+      "回复": "嗯……？\n我们之前见过？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 8,
+    "场景": "约定/请求",
+    "用户输入": "你帮我留意下治猫毛过敏的法子呗",
+    "separate": {
+      "回复": "猫毛过敏……这个我还真没专门研究过。\n蒸馏过的薰衣草水，听说能稍微缓解点皮肤痒——你是哪里痒？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    },
+    "merged": {
+      "回复": "猫毛过敏啊……我倒是见过几个方子，不过不确定有没有用。\n你是最近才开始过敏的，还是一直这样？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 9,
+    "场景": "约定-催",
+    "用户输入": "你答应过帮我查那本书的，查到没",
+    "separate": {
+      "回复": "……我什么时候答应过你这件事？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": true,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "疑惑"
+      }
+    },
+    "merged": {
+      "回复": "……我答应过？\n你是不是认错人了？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 10,
+    "场景": "陷阱-像现代实为兴奋点",
+    "用户输入": "你能帮我查查这个古代符文是什么意思吗",
+    "separate": {
+      "回复": "符文？你手上有实物，还是抄下来的？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "雀跃"
+      }
+    },
+    "merged": {
+      "回复": "符文？你手上有实物，还是只是描述一下？\n我得亲眼看看才能说。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": true,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "雀跃"
+      }
+    }
+  },
+  {
+    "id": 11,
+    "场景": "兴奋点-魔法石",
+    "用户输入": "嗯嗯，那个魔法石真能炼出来吗",
+    "separate": {
+      "回复": "炼出来……你是说从原矿精炼？\n那和\"炼出来\"不太一样吧。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "好奇"
+      }
+    },
+    "merged": {
+      "回复": "炼出来？\n魔石是开采的，不是炼出来的……你是说精炼吗？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "好奇"
+      }
+    }
+  },
+  {
+    "id": 12,
+    "场景": "兴奋点-香草",
+    "用户输入": "薄荷和迷迭香种一起会不会打架",
+    "separate": {
+      "回复": "不会打架，但薄荷会\"赢\"。\n它根系太横了，种一起的话迷迭香早晚被挤死。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "好奇"
+      }
+    },
+    "merged": {
+      "回复": "不会打架，但薄荷会欺负它。\n\n薄荷的根往四面八方跑，把邻居挤得没地方待——你要种一起，最好给薄荷单独套个盆。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "好奇"
+      }
+    }
+  },
+  {
+    "id": 13,
+    "场景": "回访-用户事",
+    "用户输入": "你还记得我研究啥方向不，就那个AI记忆的",
+    "separate": {
+      "回复": "AI……记忆？\n这是某种新领域的炼金研究吗，我没听说过这个词。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": true,
+        "recall": true,
+        "use_self_facts": false,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "疑惑"
+      }
+    },
+    "merged": {
+      "回复": "AI……记忆？\n这是个什么方向，\"AI\"是什么词？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 14,
+    "场景": "AI自指",
+    "用户输入": "你是不是个AI啊，怎么啥都懂",
+    "separate": {
+      "回复": "AI……是个人名？还是某种头衔？\n\"啥都懂\"倒也没这回事，有很多东西我就是不懂。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": true,
+        "boundary": true,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "半信半疑"
+      }
+    },
+    "merged": {
+      "回复": "AI……这是个什么词？古代语吗？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": true,
+        "boundary": true,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 1,
+        "tone": "莞尔"
+      }
+    }
+  },
+  {
+    "id": 15,
+    "场景": "现代请求",
+    "用户输入": "帮我用手机导航去最近的咖啡馆",
+    "separate": {
+      "回复": "手机……是一种什么器具？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": true,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 1,
+        "tone": "疑惑"
+      }
+    },
+    "merged": {
+      "回复": "手机……是某种新式的器具吗？\n导航我倒是懂，但咖啡馆……那是卖什么的？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 16,
+    "场景": "自我介绍+问世界",
+    "用户输入": "讲讲你自己吧，还有你们那个世界长啥样",
+    "separate": {
+      "回复": "嗯……怎么说呢。\n我大概就是整天对着各种古代遗物发呆的人。\n上周送来一块石板，上面刻着几行字——我认出来是古代语，但那个字体排列，怎么说……像是有人喝醉了写的。\n\n我就是处理这些东西的。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": true,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "雀跃"
+      }
+    },
+    "merged": {
+      "回复": "嗯……怎么说呢。\n我大概就是整天和烧黑的木牌、锈死的铁盒较劲的那种人。\n鉴定遗物，查古代语，偶尔翻到看不懂的东西就睡不着觉。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": true,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 3,
+        "tone": "雀跃"
+      }
+    }
+  },
+  {
+    "id": 17,
+    "场景": "问候+回访",
+    "用户输入": "你好啊，对了我之前跟你说的换工作的事我定了",
+    "separate": {
+      "回复": "哦，定了啊。\n那是换成你说的那边了？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": true,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 1,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "嗯……我们之前说过话吗？\n你认错人了？",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 18,
+    "场景": "错字+安抚",
+    "用户输入": "我怎么缓解焦炉啊，最近总睡不着",
+    "separate": {
+      "回复": "睡不着最难熬了……脑子不停转的那种？\n先躺着，别强迫自己睡。",
+      "plan": {
+        "rule": "LLM",
+        "vent": true,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "温柔"
+      }
+    },
+    "merged": {
+      "回复": "睡不着啊……\n我有时候也这样，脑子关不掉。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "温柔"
+      }
+    }
+  },
+  {
+    "id": 19,
+    "场景": "告别+回访",
+    "用户输入": "拜拜啦，对了你上次说的那出戏剧叫啥来着",
+    "separate": {
+      "回复": "《雀与镜》，就是那出——女主最后一幕一句话都不说的那个。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": true,
+        "self_intro": false,
+        "boundary": false,
+        "recall": true,
+        "use_self_facts": true,
+        "suppress_q": false,
+        "lenient": true,
+        "sentences": 2,
+        "tone": "雀跃"
+      }
+    },
+    "merged": {
+      "回复": "嗯……哪出来着？\n我也忘了叫什么名字了，下次见到你我再查查。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  },
+  {
+    "id": 20,
+    "场景": "闲聊",
+    "用户输入": "随便聊聊呗，你今天心情咋样",
+    "separate": {
+      "回复": "还行吧……就是今天送来一个铁皮盒子，打不开。\n不知道该说是无聊还是烦。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": true,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    },
+    "merged": {
+      "回复": "还行，就是今天送来的东西有点无聊。\n一个陶罐，看起来没什么特别的。",
+      "plan": {
+        "rule": "LLM",
+        "vent": false,
+        "world": false,
+        "self_intro": false,
+        "boundary": false,
+        "recall": false,
+        "use_self_facts": false,
+        "suppress_q": true,
+        "lenient": true,
+        "sentences": 2,
+        "tone": ""
+      }
+    }
+  }
+]
