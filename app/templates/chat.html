@@ -2995,8 +2995,8 @@ function renderPromptsList(components) {
         <div class="card-diff-bar">
           <span>对比基线</span>
           <select class="diff-base">
-            <option value="default">仓库默认</option>
-            <option value="applied">已应用</option>
+            <option value="applied">当前默认（已应用）</option>
+            <option value="default">仓库原始（未覆盖）</option>
           </select>
           <span class="grow"></span>
           <span class="diff-stat"></span>
@@ -3020,6 +3020,12 @@ function renderPromptsList(components) {
     const diffToggle = card.querySelector('.diff-toggle');
     const diffPanel = card.querySelector('.card-diff');
     const diffBaseSel = card.querySelector('.diff-base');
+    // Name the active-default baseline after the actual default version (the
+    // topbar "默认" tag), so it's unmistakable which prompt it diffs against —
+    // and not confused with the repo baseline ("仓库原始").
+    const _appliedOpt = diffBaseSel.querySelector('option[value="applied"]');
+    const _dpName = state.defaultPrompt && state.defaultPrompt.name;
+    if (_appliedOpt) _appliedOpt.textContent = _dpName ? `当前默认（${_dpName}）` : '当前默认（已应用）';
     const diffRowsEl = card.querySelector('.card-diff .diff-rows');
     const diffColHead = card.querySelector('.diff-col-head');
     const diffStat = card.querySelector('.diff-stat');
