@@ -539,6 +539,23 @@ def _match_default_version() -> dict | None:
     return None
 
 
+def _effective_prompt_version_id(conv) -> str | None:
+    """这个会话实际生效的 prompt 版本 id，用于给问卷/逐条反馈打标。
+
+    - 共享模式 + 已 pin 某版本 → 该版本 id。
+    - 共享模式 + 未 pin（跟随全局默认）→ 当前全局默认对应的已保存版本 id；
+      若默认是「自定义」（不匹配任何已保存版本）则为 None。
+      ——这一支正是之前漏标的常见情况：直接存 conv.prompt_version_id 会得到 None。
+    - 私有模式 → None（用的是会话内联自定义 prompt，由 prompt_mode="private" 标识）。
+    """
+    if conv.prompt_mode == "shared":
+        if conv.prompt_version_id:
+            return conv.prompt_version_id
+        matched = _match_default_version()
+        return matched["version_id"] if matched else None
+    return None
+
+
 def _sanitize_forced_state(fs: dict) -> dict:
     """Whitelist + clamp the user-submitted forced_state.
 
@@ -1625,7 +1642,8 @@ def create_app() -> Flask:
         if _store._path(session_id).exists():
             conv = _store.load(session_id)
             session_title = conv.title
-            prompt_version_id = conv.prompt_version_id
+            # 跟随全局默认的共享会话，要解析出当时实际生效的默认版本，别只存 None。
+            prompt_version_id = _effective_prompt_version_id(conv)
             prompt_mode = conv.prompt_mode
             message_count = len(conv.messages)
             if conv.messages:
@@ -1673,7 +1691,7 @@ def create_app() -> Flask:
         if _store._path(session_id).exists():
             conv = _store.load(session_id)
             session_title = conv.title
-            prompt_version_id = conv.prompt_version_id
+            prompt_version_id = _effective_prompt_version_id(conv)
         try:
             entry = _msg_feedback_store.set(
                 session_id=session_id,
