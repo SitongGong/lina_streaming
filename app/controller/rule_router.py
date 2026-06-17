@@ -432,6 +432,7 @@ class LinaRuleRouter:
                 allow_doubt_wrap=False,
                 allow_segment=False,   # 问候/告别一句话，不拆段
                 enforce_mood_continuity=True,
+                user_farewell=is_farewell,   # 规则层告别命中 → 标记用户在告别（停主动）
                 trace_source="rule",
                 matched_rule="plain_farewell" if is_farewell else "plain_greeting",
             )

@@ -803,6 +803,8 @@ class CharacterEngine:
         self,
         conversation: Conversation,
         extra_memory_chunks: list[Chunk] | None = None,
+        user_facts: dict | None = None,
+        self_facts: dict | None = None,
     ) -> ChatResult:
         return self._run_proactive(
             conversation,
@@ -810,6 +812,8 @@ class CharacterEngine:
             mode="engage",
             extra_memory_chunks=extra_memory_chunks,
             is_farewell=False,
+            user_facts=user_facts,
+            self_facts=self_facts,
         )
 
     # 告别指令：用户连续多次没回应主动搭话时，让莉娜自然地结束话题。
@@ -820,6 +824,8 @@ class CharacterEngine:
         self,
         conversation: Conversation,
         extra_memory_chunks: list[Chunk] | None = None,
+        user_facts: dict | None = None,
+        self_facts: dict | None = None,
     ) -> ChatResult:
         return self._run_proactive(
             conversation,
@@ -827,6 +833,8 @@ class CharacterEngine:
             mode="farewell",
             extra_memory_chunks=extra_memory_chunks,
             is_farewell=True,
+            user_facts=user_facts,
+            self_facts=self_facts,
         )
 
     def _run_proactive(
@@ -837,6 +845,8 @@ class CharacterEngine:
         mode: str,
         extra_memory_chunks: list[Chunk] | None,
         is_farewell: bool,
+        user_facts: dict | None = None,
+        self_facts: dict | None = None,
     ) -> ChatResult:
         """Shared body for proactive() and proactive_farewell().
 
@@ -900,7 +910,7 @@ class CharacterEngine:
                     is_proactive=True,
                 )
                 picked = self._controller.pick_proactive_topic_sync(
-                    ctx, avoid_hooks=avoid_hooks, stage=stage
+                    ctx, avoid_hooks=avoid_hooks, stage=stage, user_facts=user_facts
                 )
                 topic_hook = (picked or {}).get("topic_hook", "") or ""
                 topic_query = (picked or {}).get("query_hint", "") or ""
@@ -966,8 +976,27 @@ class CharacterEngine:
         if history_window > 0:
             prior = prior[-history_window:]
 
+        # 注入用户长期记忆，让主动开口时也"记得用户"。清单短→整份注入。
+        uf_text = ""
+        if user_facts:
+            try:
+                from .user_facts import UserFactsStore
+                total = sum(len(v) for v in user_facts.values() if isinstance(v, list))
+                uf_text = (UserFactsStore.render(user_facts) if total <= 40
+                           else UserFactsStore.search(user_facts, topic_query or last_user_text, k=10))
+            except Exception:
+                uf_text = ""
+        # 注入莉娜自己的事实清单，让她主动开口时**不和自己以前说过的话冲突**。
+        sf_text = ""
+        if self_facts:
+            try:
+                from .self_facts import SelfFactsStore
+                sf_text = SelfFactsStore.render(self_facts)
+            except Exception:
+                sf_text = ""
         composed_instruction = self._build_user_content(
-            instruction, retrieved, retrieved_history, prior_mood
+            instruction, retrieved, retrieved_history, prior_mood,
+            self_facts_text=sf_text, user_facts_text=uf_text
         )
         api_messages = prior + [{"role": "user", "content": composed_instruction}]
 
@@ -995,10 +1024,10 @@ class CharacterEngine:
             meta["topic_hook"] = topic_hook   # 记下本次话头，供下次去重
         conversation.add("assistant", cleaned_reply, meta=meta)
 
-        # 主动发言里莉娜**主动讲了自己的经历**（尤其 self 级），这是最该记进自我
-        # 事实清单的内容。把这次自述作为一对 turn 交出去，让 web 层后台概括入库。
-        # （engage 接用户话题那两级也带上，里面若有她的自我信息一并被提炼。）
-        slid_out = [("", cleaned_reply)] if cleaned_reply else []
+        # 主动发言**不喂进记忆清单**：它是为了找话头而即兴抛出的内容（小八卦、随口
+        # 联想），不是用户/莉娜确认过的稳定事实。之前把它当 slid_out 提炼入库，会让
+        # 这些即兴内容污染记忆、和她真说过的话冲突、并干扰之后的对话。故这里返回空。
+        slid_out: list = []
 
         usage = response.usage
         return ChatResult(
