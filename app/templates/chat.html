@@ -2838,7 +2838,7 @@ function renderFeedbackSummary(qData, mData) {
         <span class="msg-excerpt">${escapeHtml(it.text || '（无正文）')}</span>
         ${it.reason ? `<span class="msg-reason">— ${escapeHtml(it.reason)}</span>` : ''}
       </span>
-      <span class="reason-src" title="${escapeHtml(it.session_id)}">${escapeHtml(_fbLocLabel(it))}</span>
+      <span class="reason-src" title="${escapeHtml(it.session_id)}">${it.user_id ? '👤' + escapeHtml(it.user_id) + ' · ' : ''}${escapeHtml(_fbLocLabel(it))}</span>
     </div>`).join('');
   // 按维度拆分的赞踩计数（本次新增）
   const dimBreak = (mData.by_dimension || []).map(b => `
