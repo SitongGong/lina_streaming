@@ -1626,6 +1626,28 @@ def create_app() -> Flask:
             },
         )
 
+    @app.route("/api/tts/say", methods=["POST"])
+    def tts_say():
+        """Single-shot TTS of a whole message via the remote *asta* engine
+        (fixed emotion=joy), returning one WAV. Used by the per-message 🔊 replay
+        so a replay uses the same asta voice as fresh replies (the client caches
+        it per message). No local GPU needed. Gated like /api/voice/say."""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"ok": False, "error": "文本为空"}), 400
+        text = text[:2000]
+        try:
+            wav = asta_tts.synthesize(text)
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)}), 502
+        if not wav:
+            return jsonify({"ok": False, "error": "合成为空"}), 502
+        return Response(wav, mimetype="audio/wav")
+
     @app.route("/api/tts/speak", methods=["POST"])
     def tts_speak():
         """Voice an already-generated TEXT reply sentence-by-sentence via the

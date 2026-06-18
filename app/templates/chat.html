@@ -2431,7 +2431,7 @@ async function send() {
     state.lastMeta = data.mood || state.lastMeta;
     renderChunks(data.retrieved, data.retrieved_history);
     renderUsage(data.usage);
-    speakText(data.reply, data.mood, { interrupt: true });  // 文字输入也朗读
+    speakText(data.reply, data.mood, { interrupt: true, el: typingEl });  // 文字输入也朗读（音频缓存到该气泡，🔊 复用同一条）
     // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
@@ -3787,43 +3787,36 @@ function stopAudio() {
   voice.playing = false;
 }
 
-// Speak an assistant message via TTS into the playback queue, so TEXT replies
-// (and continuation / proactive messages) are voiced too — not just the mic
-// path. Uses the remote *asta* TTS engine over HTTP (/api/tts/speak), which
-// synthesizes sentence-by-sentence with a fixed "joy" emotion and needs no
-// local GPU — so it works regardless of voice.modelState (that flag only tracks
-// the local qwen models used by the mic voice-chat path). Best-effort: silent
-// when asta is unreachable (text is already shown). `opts.interrupt` stops any
-// currently-playing/queued audio first (used for a fresh user turn). `mood` is
+// Speak an assistant message via the remote *asta* TTS engine over HTTP
+// (/api/tts/say): ONE single-shot call for the WHOLE message with a fixed
+// "joy" emotion — the SAME path the 🔊 replay uses, so auto-narration and a
+// later replay sound identical (whole-message prosody, not chopped per
+// sentence). No local GPU needed (works regardless of voice.modelState, which
+// only tracks the mic path's local qwen models). When `opts.el` is the
+// assistant message element, the synthesized audio is cached on it
+// (el.__audioUrl) so clicking 🔊 replays the EXACT same audio instead of
+// re-synthesizing. Best-effort: silent if asta is unreachable (text already
+// shown). `opts.interrupt` stops any current/queued audio first. `mood` is
 // accepted for call-site compatibility but unused (asta uses the fixed emotion).
 async function speakText(text, mood, opts = {}) {
   const t = (text || '').trim();
   if (!t) return;
   if (opts.interrupt) stopAudio();
   try {
-    const res = await fetch('/api/tts/speak', {
+    const res = await fetch('/api/tts/say', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
       body: JSON.stringify({ text: t }),
     });
     if (!res.ok) return;   // synthesis unavailable — text already shown, stay silent
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n\n')) >= 0) {
-        const raw = buf.slice(0, nl); buf = buf.slice(nl + 2);
-        const line = raw.replace(/^data:\s?/, '');
-        if (!line) continue;
-        let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
-        if (ev.type === 'audio') enqueueAudio(ev.audio, ev.mime);
-        // 'done' / 'error' need no UI handling here — voicing is best-effort.
-      }
-    }
+    const blob = await res.blob();
+    // Cache a SEPARATE object URL on the bubble for the 🔊 replay. The URL we
+    // queue for immediate playback gets revoked by playNextAudio when it ends,
+    // so caching that same URL would leave 🔊 with a dead (revoked) URL → no
+    // sound. Two URLs from one blob are independent; revoking one keeps the other.
+    if (opts.el) opts.el.__audioUrl = URL.createObjectURL(blob);
+    voice.audioQueue.push(URL.createObjectURL(blob));
+    playNextAudio();
   } catch (e) { /* best-effort; text already shown */ }
 }
 
@@ -3843,18 +3836,16 @@ function playReplay(url, btn) {
 async function replayMessage(wrap, btn) {
   const text = (wrap.querySelector('.content')?.textContent || '').trim();
   if (!text) return;
-  if (voice.modelState !== 'ready') {
-    toast(voice.modelState === 'loading' ? '语音模型加载中，请稍候…' : '语音模型未就绪，无法朗读。');
-    return;
-  }
   // Cached from a previous replay of this exact message → instant.
   if (wrap.__audioUrl) { playReplay(wrap.__audioUrl, btn); return; }
   btn.classList.add('loading'); btn.disabled = true;
   try {
-    const res = await fetch('/api/voice/say', {
+    // Use the remote asta TTS (fixed joy) so a replay matches the voice of
+    // fresh replies; no local GPU model needed. Cached per message below.
+    const res = await fetch('/api/tts/say', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-      body: JSON.stringify({ text, mood: wrap.__meta || null }),
+      body: JSON.stringify({ text }),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
@@ -4127,7 +4118,7 @@ async function runContinue() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
-      speakText(data.reply, data.mood);  // 续说段也朗读（接在上一段之后播）
+      speakText(data.reply, data.mood, { el: wrap });  // 续说段也朗读（接在上一段之后播）
       state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
       await loadSessions();
       scrollToBottom();
@@ -4165,7 +4156,7 @@ async function runProactive() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
-      speakText(data.reply, data.mood);  // 主动找话也朗读
+      speakText(data.reply, data.mood, { el: wrap });  // 主动找话也朗读
       await loadSessions();
       scrollToBottom();
       // 告别了就把计数拉满 → 之后 maybeProactive 不再发起；否则推进一档。
