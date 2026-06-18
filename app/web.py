@@ -56,6 +56,7 @@ from .rag import retrieve_user_memory_chunks
 from .self_facts import SelfFactsStore
 from .user_facts import UserFactsStore
 from .voice import get_voice_engine, iter_sentences, mood_to_instruct
+from . import asta_tts
 
 
 # ---- Engine pool: one CharacterEngine per pinned prompt version. The
@@ -1614,6 +1615,59 @@ def create_app() -> Flask:
                 # request if the client bailed (barge-in). On a clean finish
                 # this is a harmless no-op.
                 gen.close()
+
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.route("/api/tts/speak", methods=["POST"])
+    def tts_speak():
+        """Voice an already-generated TEXT reply sentence-by-sentence via the
+        remote *asta* TTS engine with a fixed emotion (default joy). Streams
+        base64 `audio` events over SSE — one per sentence — so playback starts
+        on sentence #1. Unlike /api/voice/say (local-GPU qwen-tts, whole reply),
+        this needs no GPU on the host and is per-sentence + fixed joy. Gated on a
+        connected client, same as /api/voice/say, to avoid anonymous abuse."""
+        cid = _client_id() or _ANON_CLIENT
+        if not _client_ready(cid):
+            return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
+        data = request.get_json(force=True, silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return jsonify({"ok": False, "error": "文本为空"}), 400
+        text = text[:4000]  # bound total synthesis work per request
+
+        def event_stream():
+            try:
+                sentences, _ = iter_sentences(text, flush=True)
+                idx = 0
+                for s in sentences:
+                    try:
+                        wav = asta_tts.synthesize(s)
+                    except Exception as e:  # noqa: BLE001 — report, keep going
+                        yield _sse({"type": "error", "index": idx, "error": str(e)})
+                        continue
+                    if not wav:
+                        continue
+                    yield _sse(
+                        {
+                            "type": "audio",
+                            "index": idx,
+                            "text": s,
+                            "mime": "audio/wav",
+                            "audio": base64.b64encode(wav).decode("ascii"),
+                        }
+                    )
+                    idx += 1
+                yield _sse({"type": "done"})
+            except Exception as e:  # noqa: BLE001
+                yield _sse({"type": "error", "error": str(e)})
 
         return Response(
             event_stream(),

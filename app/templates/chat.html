@@ -3788,25 +3788,42 @@ function stopAudio() {
 }
 
 // Speak an assistant message via TTS into the playback queue, so TEXT replies
-// (and continuation / proactive messages) are voiced too — not just the voice
-// path. Best-effort: silently no-ops when the voice models aren't loaded, so
-// text chat still works when TTS is unavailable. `opts.interrupt` stops any
-// currently-playing/queued audio first (used for a fresh user turn).
+// (and continuation / proactive messages) are voiced too — not just the mic
+// path. Uses the remote *asta* TTS engine over HTTP (/api/tts/speak), which
+// synthesizes sentence-by-sentence with a fixed "joy" emotion and needs no
+// local GPU — so it works regardless of voice.modelState (that flag only tracks
+// the local qwen models used by the mic voice-chat path). Best-effort: silent
+// when asta is unreachable (text is already shown). `opts.interrupt` stops any
+// currently-playing/queued audio first (used for a fresh user turn). `mood` is
+// accepted for call-site compatibility but unused (asta uses the fixed emotion).
 async function speakText(text, mood, opts = {}) {
-  if (voice.modelState !== 'ready') return;
   const t = (text || '').trim();
   if (!t) return;
+  if (opts.interrupt) stopAudio();
   try {
-    const res = await fetch('/api/voice/say', {
+    const res = await fetch('/api/tts/speak', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-      body: JSON.stringify({ text: t, mood: mood || null }),
+      body: JSON.stringify({ text: t }),
     });
-    if (!res.ok) return;   // synthesis failed — text is already shown, stay silent
-    const url = URL.createObjectURL(await res.blob());
-    if (opts.interrupt) stopAudio();
-    voice.audioQueue.push(url);
-    playNextAudio();
+    if (!res.ok) return;   // synthesis unavailable — text already shown, stay silent
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, nl); buf = buf.slice(nl + 2);
+        const line = raw.replace(/^data:\s?/, '');
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+        if (ev.type === 'audio') enqueueAudio(ev.audio, ev.mime);
+        // 'done' / 'error' need no UI handling here — voicing is best-effort.
+      }
+    }
   } catch (e) { /* best-effort; text already shown */ }
 }
 
