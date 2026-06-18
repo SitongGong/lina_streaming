@@ -333,6 +333,11 @@ _PROMPT_KEYS = {k for k, _, _, _ in PROMPT_COMPONENTS}
 OVERRIDES_DIR = PROJECT_ROOT / "prompt_overrides"
 OVERRIDES_FILE = OVERRIDES_DIR / "current.json"
 VERSIONS_DIR = OVERRIDES_DIR / "versions"
+# Explicitly-recorded active default version id. Without it, "which version is
+# the current default" was inferred by content-matching newest-first, so a newer
+# version with identical content would hijack the displayed name even when
+# nothing actually changed. This pointer makes the displayed default deterministic.
+ACTIVE_VERSION_FILE = OVERRIDES_DIR / "active_version_id"
 
 _overrides: dict[str, str] = {}
 _VERSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
@@ -526,12 +531,41 @@ def _sync_controller_overrides() -> None:
     reload_rule_patterns()
 
 
+def _read_active_version_id() -> str | None:
+    try:
+        if ACTIVE_VERSION_FILE.exists():
+            return ACTIVE_VERSION_FILE.read_text(encoding="utf-8").strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _write_active_version_id(version_id: str | None) -> None:
+    """Record (or clear) the explicitly-chosen active default version id."""
+    try:
+        if version_id:
+            ACTIVE_VERSION_FILE.write_text(version_id, encoding="utf-8")
+        elif ACTIVE_VERSION_FILE.exists():
+            ACTIVE_VERSION_FILE.unlink()
+    except Exception:
+        pass
+
+
 def _match_default_version() -> dict | None:
-    """If the active global default (`_overrides`) exactly equals some saved
-    version's overrides, return that version's {version_id, name}; else None
-    ("自定义"). Self-correcting: editing the default in the 提示词 tab makes it
-    stop matching, so the UI never shows a stale version name."""
+    """Return the active global default version's {version_id, name}, or None
+    ("自定义") when the live default doesn't equal any saved version.
+
+    Prefers the explicitly-recorded active version (set on restore) as long as
+    it still matches the live `_overrides` — so a newer version with identical
+    content can't hijack the displayed name. Falls back to content-matching
+    (newest first) for defaults set before this pointer existed, or edited away
+    in the 提示词 tab (in which case nothing matches → None → "自定义")."""
     cur = dict(_overrides)
+    pinned = _read_active_version_id()
+    if pinned:
+        data = _load_version(pinned)
+        if data is not None and dict(data.get("overrides", {})) == cur:
+            return {"version_id": pinned, "name": data.get("name", "")}
     for v in _list_versions():  # newest first
         data = _load_version(v["version_id"])
         if data is not None and dict(data.get("overrides", {})) == cur:
@@ -1847,6 +1881,7 @@ def create_app() -> Flask:
         _overrides.clear()
         _overrides.update(data.get("overrides", {}))
         _save_overrides_to_disk(_overrides)
+        _write_active_version_id(version_id)  # 显式记录所选版本，避免同内容新快照抢占显示名
         _invalidate_current_engine()
         return jsonify({"ok": True, "override_count": len(_overrides)})
 
