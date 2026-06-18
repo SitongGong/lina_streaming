@@ -23,6 +23,29 @@ Everything below is env-overridable.
 
 import os
 
+# --- Persisted admin user list -------------------------------------------
+# Admins (who can see the 汇总 stats) come from env var LINA_ADMIN_USERS, read
+# once at app import. To keep it durable across plain `gunicorn -c gunicorn_conf.py`
+# restarts (instead of re-typing it inline every time), this config — executed in
+# the master before workers fork, so the value is inherited — seeds the env var
+# from a local file when it isn't already set. The file is gitignored, so the
+# instance's admin names never go into the shared repo. One username per line;
+# blank lines and #-comments ignored. Inline env still wins if provided.
+if not os.environ.get("LINA_ADMIN_USERS"):
+    _admin_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_users.local")
+    try:
+        with open(_admin_file, encoding="utf-8") as _f:
+            _admins = " ".join(
+                ln.strip() for ln in _f if ln.strip() and not ln.lstrip().startswith("#")
+            )
+        if _admins:
+            os.environ["LINA_ADMIN_USERS"] = _admins
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+# -------------------------------------------------------------------------
+
 # The app factory. With this set, just run `gunicorn -c gunicorn_conf.py`.
 wsgi_app = "app.web:create_app()"
 

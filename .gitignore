@@ -18,3 +18,6 @@ users/
 conversations/users/
 sess-*.json
 .vscode/
+
+# 本地管理员名单（实例配置，不入仓库）
+admin_users.local
