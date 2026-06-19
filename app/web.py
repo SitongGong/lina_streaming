@@ -1515,12 +1515,12 @@ def create_app() -> Flask:
     def voice_chat():
         """Streaming voice reply over SSE.
 
-        Streams Claude's tokens as `delta` events for live captions, and — as
-        each spoken sentence completes — synthesizes it and emits the audio as
-        a base64 `audio` event so playback begins on sentence #1 rather than
-        after the whole reply. If the client aborts the request (the barge-in
-        interrupt), the generator is closed, the upstream Claude stream is
-        aborted, and nothing is persisted."""
+        Streams Claude's tokens as `delta` events for live captions; when the
+        reply is complete it synthesizes the WHOLE reply once via the remote
+        *asta* engine (fixed joy) and emits it as a single base64 `audio` event
+        — so a mic reply uses the SAME audio as text chat (asta joy), not the
+        local qwen-tts. If the client aborts (barge-in), the generator is
+        closed, the upstream Claude stream is aborted, and nothing is persisted."""
         cid = _client_id() or _ANON_CLIENT
         if not _client_ready(cid):
             return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
@@ -1537,35 +1537,12 @@ def create_app() -> Flask:
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
 
-        ve = get_voice_engine()
-        tts_ready = ve.status()["state"] == "ready"
         voice_self_facts = _self_facts_store.load(cid)  # 注入自我事实（语音路径只读不更新）
 
         def event_stream():
             gen = engine.chat_stream(conv, message, self_facts=voice_self_facts)
-            pending = ""        # visible text not yet flushed to a TTS sentence
-            cur_mood = None     # latest parsed mood — drives TTS delivery style
-            idx = 0             # audio chunk ordering index
-
-            def synth(sentence: str):
-                nonlocal idx
-                if not tts_ready:
-                    return None
-                try:
-                    wav_bytes, _sr = ve.synthesize(sentence, mood_to_instruct(cur_mood))
-                except Exception:
-                    return None
-                if not wav_bytes:
-                    return None
-                ev = {
-                    "type": "audio",
-                    "index": idx,
-                    "text": sentence,
-                    "mime": "audio/wav",
-                    "audio": base64.b64encode(wav_bytes).decode("ascii"),
-                }
-                idx += 1
-                return ev
+            cur_mood = None     # latest parsed mood (forwarded to client for UI)
+            full_text = ""      # accumulate the spoken reply from delta events
 
             try:
                 for ev in gen:
@@ -1574,22 +1551,28 @@ def create_app() -> Flask:
                         cur_mood = ev.get("mood")
                         yield _sse({"type": "mood", "mood": cur_mood})
                     elif etype == "delta":
+                        # Stream text for live captions only; the reply is voiced
+                        # once at the end (whole message) via the remote asta
+                        # engine, so the mic reply uses the SAME audio as text
+                        # chat (asta joy) instead of the local qwen-tts.
+                        full_text += ev["text"]
                         yield _sse({"type": "delta", "text": ev["text"]})
-                        pending += ev["text"]
-                        sentences, pending = iter_sentences(pending)
-                        for s in sentences:
-                            audio_ev = synth(s)
-                            if audio_ev:
-                                yield _sse(audio_ev)
                     elif etype == "done":
-                        # Speak whatever's left in the buffer as a last chunk.
-                        sentences, pending = iter_sentences(pending, flush=True)
-                        for s in sentences:
-                            audio_ev = synth(s)
-                            if audio_ev:
-                                yield _sse(audio_ev)
                         # engine.chat_stream has now mutated conv; persist it.
                         _store.save(conv)
+                        full = (ev.get("text") or full_text or "").strip()
+                        try:
+                            wav = asta_tts.synthesize(full)
+                            if wav:
+                                yield _sse({
+                                    "type": "audio",
+                                    "index": 0,
+                                    "text": full,
+                                    "mime": "audio/wav",
+                                    "audio": base64.b64encode(wav).decode("ascii"),
+                                })
+                        except Exception:
+                            pass  # best-effort; captions already shown
                         yield _sse(
                             {
                                 "type": "done",
