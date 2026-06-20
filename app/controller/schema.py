@@ -216,6 +216,9 @@ class LinaPromptPlan:
     # 用户本轮在**主动告别/想结束对话**（含长句里夹的告别意图，如"先聊这些吧，我去休息了"）。
     # 前端据此：温柔收束后**暂停主动发言**，直到用户下次开口。
     user_farewell: bool = False
+    # 本轮是否该调莉娜的日记/谈资来聊（用户在聊有生活/情感/经历内容的话题，或该主动
+    # 找话时为真）。为真才触发日记两级检索（话题→日记），省开销也更可控。
+    need_diary: bool = False
     # 本轮要注入哪些 few-shot 示例（按 tag，对应 fewshot/<tag>.txt）。由 suppress/
     # lenient 等开关自动带出，也可由规则/顾问直接指定。post_init 去重+白名单+截断。
     fewshot_tags: tuple[str, ...] = ()
@@ -266,6 +269,7 @@ class LinaPromptPlan:
         object.__setattr__(self, "lenient_typos", _coerce_bool(self.lenient_typos))
         object.__setattr__(self, "user_positive", _coerce_bool(self.user_positive))
         object.__setattr__(self, "user_farewell", _coerce_bool(self.user_farewell))
+        object.__setattr__(self, "need_diary", _coerce_bool(self.need_diary))
         tags = tuple(t for t in _unique_keep_order(self.fewshot_tags) if t in _VALID_FEWSHOT)
         object.__setattr__(self, "fewshot_tags", tags[:_MAX_FEWSHOT_TAGS])
         object.__setattr__(self, "enforce_mood_continuity", _coerce_bool(self.enforce_mood_continuity))

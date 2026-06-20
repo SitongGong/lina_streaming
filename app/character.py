@@ -78,6 +78,13 @@ def parse_segments_tag(raw: str) -> tuple[str, list[str]]:
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
+# 本地「滑出窗口旧对话」BM25 检索（retrieve_history_chunks）开关：默认【关】。
+# 用户对话历史记忆已由 EverMem 云接管，这条本地 BM25 历史检索与之重复、且会与
+# EverMem 召回打架，故默认禁用（代码保留，置 LINA_HISTORY_RECALL=1 可启用，
+# 如不接 EverMem 时作兜底）。
+import os as _os
+_HISTORY_RECALL_ON = _os.environ.get("LINA_HISTORY_RECALL", "").strip() in ("1", "true", "True")
+
 
 # 主模型 prompt 已外置到 prompts/main/ 下的文件，便于修改（不再写死在代码里）。
 # 内容与历史版本一字不差，只是改为从文件加载。overrides 机制不变。
@@ -99,6 +106,33 @@ SEGMENT_PROTOCOL_SPEC = _load_main_prompt("segment_protocol_spec.txt")
 SYSTEM_PROMPT_TEMPLATE = _load_main_prompt("system_prompt_template.txt")
 
 
+def _block_text(block) -> str:
+    """从 system block / message content 里抽出纯文本（兼容 str 与 {type,text} dict / list）。"""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        return block.get("text", "") or ""
+    if isinstance(block, list):
+        return "\n".join(_block_text(b) for b in block)
+    return str(block)
+
+
+def _render_final_prompt(system_blocks, api_messages) -> str:
+    """把最终发给主模型的 system + messages 原样拼成可读文本（仅调试展示，不影响发送内容）。"""
+    parts: list[str] = ["================ SYSTEM ================"]
+    for i, blk in enumerate(system_blocks or [], 1):
+        cache = ""
+        if isinstance(blk, dict) and blk.get("cache_control"):
+            cache = "  [cache]"
+        parts.append(f"\n----- system block #{i}{cache} -----\n{_block_text(blk)}")
+    parts.append("\n================ MESSAGES ================")
+    for msg in api_messages or []:
+        role = msg.get("role", "?") if isinstance(msg, dict) else "?"
+        content = msg.get("content") if isinstance(msg, dict) else msg
+        parts.append(f"\n----- [{role}] -----\n{_block_text(content)}")
+    return "\n".join(parts)
+
+
 @dataclass
 class ChatResult:
     text: str
@@ -112,6 +146,10 @@ class ChatResult:
     # Per-turn controller decision + trace, surfaced for the inspector.
     plan: dict | None = None
     controller_trace: dict | None = None
+    # 日记/话题检索决策（供右侧调试面板展示）：need_diary/query_type/新旧话题/命中编号。
+    diary_debug: dict | None = None
+    # 最终拼给主模型的完整 prompt（system + messages 原样拼成可读文本，供右侧面板滚动查看）。
+    final_prompt: str | None = None
     # Remaining segment outline points this reply parked for later
     # continuation (empty = not split). Web layer arms the continue timer
     # on a non-empty list.
@@ -176,6 +214,15 @@ class CharacterEngine:
         self.history_retrieve_k = history_retrieve_k
         self.overrides: dict[str, str] = dict(overrides or {})
         self.rag = CharacterRAG(self.static_dir, file_overrides=self._file_overrides())
+        # 可检索人设走本地 EverOS（agent 轨道语义检索）。启用时取代 self.rag 的
+        # BM25 检索人设；未启用（EVEROS_PERSONA 未置）则 enabled=False，回退 self.rag。
+        # CORE 人设（self.rag.core_text）不受影响，仍全量进 prompt。
+        from .persona_memory import PersonaMemory
+        self.persona_memory = PersonaMemory()
+        # 日记/谈资两级检索（本地 EverOS）。由 plan.need_diary 门控（controller 判定
+        # 本轮该调莉娜生活经历时才检索）。未启用（EVEROS_DIARY 未置）则 enabled=False。
+        from .diary_memory import DiaryMemory
+        self.diary_memory = DiaryMemory()
         self._system_blocks = self._build_system_blocks()
         # Controller is optional. None → pre-controller behavior preserved.
         self._controller = controller
@@ -258,6 +305,32 @@ class CharacterEngine:
         last_ts = getattr(conversation.messages[-1], "ts", 0.0) or 0.0
         return max(0.0, time.time() - float(last_ts))
 
+    def _make_turn_context(
+        self,
+        user_message: str,
+        conversation: Conversation,
+        *,
+        is_proactive: bool = False,
+        is_farewell: bool = False,
+        is_continuation: bool = False,
+        has_cross_session_memory: bool = False,
+    ) -> LinaTurnContext:
+        """构造 controller 的 turn context（dispatch 和 match_topic 并发时复用）。"""
+        has_prior_assistant = any(m.role == "assistant" for m in conversation.messages)
+        last_meta = conversation.last_assistant_meta() or {}
+        return LinaTurnContext(
+            user_text=user_message,
+            history=self._history_pairs_for_controller(conversation),
+            session_id=getattr(conversation, "session_id", "") or "",
+            is_proactive=is_proactive,
+            is_farewell=is_farewell,
+            is_continuation=is_continuation,
+            is_first_turn=not has_prior_assistant,
+            has_cross_session_memory=has_cross_session_memory,
+            prior_trust=int(last_meta.get("trust", 3) or 3),
+            gap_seconds=self._gap_seconds(conversation),
+        )
+
     def _dispatch_controller(
         self,
         user_message: str,
@@ -282,19 +355,10 @@ class CharacterEngine:
             )
             return plan, None
 
-        has_prior_assistant = any(m.role == "assistant" for m in conversation.messages)
-        last_meta = conversation.last_assistant_meta() or {}
-        ctx = LinaTurnContext(      ## 给定是否为主动服务，是否为告别，是否为续写，是否为跨会话记忆，是否为第一轮，是否为信任度，是否为时间间隔
-            user_text=user_message,
-            history=self._history_pairs_for_controller(conversation),
-            session_id=getattr(conversation, "session_id", "") or "",
-            is_proactive=is_proactive,
-            is_farewell=is_farewell,
-            is_continuation=is_continuation,
-            is_first_turn=not has_prior_assistant,
-            has_cross_session_memory=has_cross_session_memory,
-            prior_trust=int(last_meta.get("trust", 3) or 3),
-            gap_seconds=self._gap_seconds(conversation),
+        ctx = self._make_turn_context(
+            user_message, conversation,
+            is_proactive=is_proactive, is_farewell=is_farewell,
+            is_continuation=is_continuation, has_cross_session_memory=has_cross_session_memory,
         )
         plan = self._controller.dispatch_sync(ctx)
         # 决策可观测：每轮把关键判断打到日志，方便不开断点就复盘 controller 行为。
@@ -317,11 +381,23 @@ class CharacterEngine:
         """Drop static chunks whose source file is disabled in the plan.
 
         Run AFTER RAG retrieval so we don't change BM25 scoring; we just
-        suppress chunks the plan said we shouldn't use."""
+        suppress chunks the plan said we shouldn't use.
+
+        注意：本过滤器是为本地 md 文件 RAG（source 形如 'personality.md'）设计的。
+        EverOS agent 轨道（PersonaMemory）回来的 chunk source 不带 .md 后缀
+        （如 'personality'/'world'），不在 static_sources 命名体系内——这类
+        chunk 由语义检索 + controller 的 query_hint 自然导向，不参与本过滤、
+        原样放行（否则会被全部误丢，导致「检索资料」恒空）。"""
         allowed = set(plan.static_sources)
+        # allowed 为空 = controller 未对来源设限 → 不过滤，全保留。
         if not allowed:
-            return []
-        return [c for c in chunks if c.source in allowed]
+            return list(chunks)
+        # 只对「带 .md 后缀的本地 md 来源」做白名单过滤；EverOS 来源（无 .md）放行。
+        return [
+            c
+            for c in chunks
+            if (not c.source.endswith(".md")) or (c.source in allowed)
+        ]
 
     def _build_dynamic_system_blocks(self, plan: LinaPromptPlan) -> list[dict]:
         """Build optional second system block from the controller plan.
@@ -347,6 +423,8 @@ class CharacterEngine:
         quoted_text: str = "",
         self_facts_text: str = "",
         user_facts_text: str = "",
+        diary_text: str = "",
+        diary_continuation: bool = False,
         pending_segments: list[str] | None = None,
     ) -> str:
         sections: list[str] = []
@@ -393,6 +471,37 @@ class CharacterEngine:
                 f"{self_facts_text}\n</莉娜的自我设定记忆>"
             )
 
+        # 莉娜日记/谈资命中项——由 controller 判定本轮该找谈资时，从预设日记库（两级
+        # 检索：话题→日记）调出的莉娜真实经历。用途：用户提到相关话题时有真事可聊、
+        # 主动找话有真素材，**不凭空编造**。只作背景素材，自然化用，别照搬复述。
+        if diary_text:
+            _cont = (
+                "（⚠️ 本轮用户是在**接着上一个话题继续追问**，比如用代词/省略问「他还好吗」"
+                "「那现在呢」。下面就是上次聊这个话题时用的同一份日记——**接着上次说过的口径往下答，"
+                "保持前后一致，不要改口、不要重新编一套**。）\n"
+                if diary_continuation else ""
+            )
+            sections.append(
+                "<莉娜的谈资与日记 — 这是为本轮话题匹配到的【话题卡】+ 卡里精确关联的【真实日记】。\n"
+                f"{_cont}"
+                "话题卡是你这个角色的「谈资说明书」：里面的开场句、可追问、莉娜观点、共情方式、"
+                "暴露边界，都是为你写好的、你该如何聊这个话题的指引；日记是你真实经历过的事。\n"
+                "**铁律（必须遵守）：**\n"
+                "1. **既然这里给了你内容，就一定要用它来聊，不许回避、不许说「没什么好说的」"
+                "「就这样」「你想听哪方面」来搪塞**。对方在问，你就照着话题卡的开场句/观点、"
+                "结合下面的真实日记，讲出具体的事。\n"
+                "   · 尤其问到**某个人（培根、安娜…）或某段经历**时，别只甩一句干巴巴的定性"
+                "（如只说「他是我老师」就完）——结合日记里的真实细节、你对他的真实感受，"
+                "讲出有温度、有画面的两三句，让人感到这是你生命里真实的人和事。\n"
+                "2. **绝不编造与日记冲突的事实**。允许你在日记基础上自然补充细节、用自己的口吻讲，"
+                "但**核心事实（时间、地点、人物、发生了什么）必须与日记一致，不能改、不能瞎编**。\n"
+                "3. 照着话题卡的「暴露边界」和「共情方式」来——它写了什么该聊、什么别追问。\n"
+                "4. 用户在倾诉/难过时：先关注他、共情他，再自然带出你的类似经历当陪伴，"
+                "不要喧宾夺主把话题抢到自己身上。\n"
+                "5. 自然化用，用你自己的语气说，不要整段照搬卡或日记的原文。>\n"
+                f"{diary_text}\n</莉娜的谈资与日记>"
+            )
+
         # 「用户事实清单」命中项——用户在过往（可能很多轮前、已滑出窗口）讲过的、
         # 关于他自己的稳定事实。这是解决「聊久了把用户的事忘了/记混/编造」的关键：
         # 按当前话题 BM25 检出相关几条注入，让莉娜记得用户是谁、聊过什么。
@@ -402,6 +511,16 @@ class CharacterEngine:
                 "请把这些当作你确实记得的事，自然地体现出「记得他」；但**只用这里列出的**，"
                 "不要凭印象编造用户没说过的事，也不要生硬复述。>\n"
                 f"{user_facts_text}\n</关于用户的记忆>"
+            )
+        else:
+            # 没有关于这个用户的任何记忆（如全新会话）。**诚实**：不要装熟、不要编
+            # 「你来过几次」「眼熟」这种。用户若问「还记得我吗」，就如实说一时想不起来/
+            # 我们好像还没怎么聊过——不假装记得一个其实没有记录的人。
+            sections.append(
+                "<关于用户的记忆 — （空：你这边没有关于这个用户的任何记忆。）\n"
+                "**这意味着你其实不认识他、或还没怎么聊过。诚实对待：不要装熟、不要编造"
+                "「你来过几次」「有点眼熟」「记得你」这类。若他问你是否记得他，就如实说"
+                "一时想不起来 / 我们好像还没正式聊过。>"
             )
 
         if retrieved:
@@ -457,17 +576,117 @@ class CharacterEngine:
         quoted_text: str = "",
         self_facts: dict | None = None,
         user_facts: dict | None = None,
+        user_memory_text: str = "",
+        diary_text: str = "",
     ) -> dict:
         """Shared setup for chat() and chat_stream(): controller dispatch,
         plan-driven RAG, mood seeding, the assembled API `messages` list, and
         the (two-block) system payload. Pure (no mutation of the
         conversation), so streaming can abort without side effects."""
-        # 1) Controller decides how to handle this turn.
-        plan, plan_trace = self._dispatch_controller(
-            user_message,
-            conversation,
-            has_cross_session_memory=bool(extra_memory_chunks),
-        )
+        import logging as _logging
+        _dlog = _logging.getLogger("lina.controller")
+        diary_continuation = False
+        diary_debug: dict = {"enabled": bool(self.diary_memory.enabled)}
+
+        # 1) Controller 判定（plan）+ 话题连续性判断器（m）。
+        # 二者互不依赖：当 controller 在 + 日记启用时，**一次并发**同时发两个 LLM 调用
+        # （dispatch_and_match_sync），省串行往返延迟；否则退回单独 dispatch。
+        m = None
+        run_diary = (not diary_text) and self.diary_memory.enabled and self._controller is not None
+        if run_diary:
+            pool = conversation.topic_pool or {}
+            recent_pairs = list(self._history_pairs_for_controller(conversation))[-6:]
+            ctx_cm = self._make_turn_context(user_message, conversation,
+                                             has_cross_session_memory=bool(extra_memory_chunks))
+            try:
+                plan, m = self._controller.dispatch_and_match_sync(
+                    ctx_cm, user_message, recent_pairs, pool)
+                plan_trace = self._controller.last_trace
+            except Exception as e:
+                _dlog.info("[diary] 并发 dispatch+match 失败，退回串行: %s", e)
+                plan, plan_trace = self._dispatch_controller(
+                    user_message, conversation, has_cross_session_memory=bool(extra_memory_chunks))
+                m = None
+        else:
+            plan, plan_trace = self._dispatch_controller(
+                user_message, conversation, has_cross_session_memory=bool(extra_memory_chunks))
+
+        # 日记/谈资两级检索：用并发拿到的 m（话题连续性判断器结果）走分支。
+        if run_diary and m is not None:
+            diary_debug.update({
+                "need_diary": bool(m.get("need_diary")),
+                "query_type": m.get("query_type"),
+                "search_query": m.get("search_query"),
+            })
+            mid = m.get("matched_topic_id")
+            if mid and mid in pool:
+                # 接续老话题 → 复用缓存（保连续）+ 直检补更具体的日记（保深入）。
+                # **关键（治状态漂移 C10）**：同一话题已经用过的日记ID 锁在 locked_ids 里，
+                # 直检补充的日记**累加进锁定集、之后一直带着**——所以培根第一次锁了哪几篇
+                # （昏迷篇等），后续每轮都用同一批，不会这轮昏迷、下轮换成告别篇导致状态飘。
+                diary_continuation = True
+                pool[mid].setdefault("turns", []).append(len(conversation.messages))
+                locked_ids = pool[mid].get("locked_ids") or list(pool[mid].get("diary_ids") or [])
+                try:
+                    extra = self.diary_memory.search_diaries_direct(
+                        m.get("search_query") or user_message, k=3
+                    )
+                except Exception:
+                    extra = []
+                added = 0
+                for d in extra:
+                    did = d.get("name", "").replace("diary_", "")
+                    if did and did not in locked_ids:
+                        locked_ids.append(did)
+                        added += 1
+                # 用锁定集里的【全部】日记重建注入文本（话题卡正文 + 所有锁定日记），稳定不漂
+                texts = [pool[mid].get("diary_text", "")]
+                got = self.diary_memory.get_diaries_by_ids(locked_ids)
+                for did in locked_ids:
+                    if did in got and got[did] not in texts[0]:
+                        texts.append(f"〔莉娜的相关经历〕{self.diary_memory._clean(got[did])}")
+                diary_text = "\n\n———\n\n".join(t for t in texts if t.strip())
+                pool[mid]["locked_ids"] = locked_ids  # 锁回缓存，下轮继续带
+                conversation.topic_pool = pool
+                diary_debug.update({
+                    "mode": "接续老话题", "topic": pool[mid].get("title", mid),
+                    "locked_diary_ids": list(locked_ids), "new_added": added,
+                })
+                _dlog.info("[diary] 接续老话题 %s（锁定 %d 篇，本轮新增 %d）",
+                           pool[mid].get("title", mid), len(locked_ids), added)
+            elif m.get("need_diary"):
+                # 新话题 → 检索 + 存池。
+                # 检索词用**判断器产出的干净 search_query**（它看了上下文、把代词/省略补全成
+                # 自包含的查询，如「他还好吗」→「培根老师的近况」）。不再把前几轮原话拼进
+                # 检索——那会稀释当前问题、召回跑偏（培根→炼金器具的 bug）。判断器没给
+                # query 时退回当前句。
+                ctx = m.get("search_query") or (user_message or "").strip()
+                try:
+                    cards = self.diary_memory.retrieve_cards(ctx, query_type=m.get("query_type") or "global")
+                except Exception as e:
+                    cards = []
+                    _dlog.info("[diary] 检索失败: %s", e)
+                if cards:
+                    diary_text = "\n\n———\n\n".join(c["text"] for c in cards)
+                    new_pool = dict(pool)
+                    for c in cards:
+                        new_pool[c["topic_id"]] = {
+                            "title": c["title"], "diary_text": c["text"],
+                            "diary_ids": c["diary_ids"], "turns": [len(conversation.messages)],
+                        }
+                    conversation.topic_pool = new_pool
+                    diary_debug.update({
+                        "mode": "新话题检索",
+                        "hit_topics": [c["title"] for c in cards],
+                        "hit_diary_ids": [d for c in cards for d in c.get("diary_ids", [])],
+                    })
+                    _dlog.info("[diary] 新话题检索+存池: %s", [c["title"] for c in cards])
+                else:
+                    diary_debug["mode"] = "需日记但无命中→回退人设"
+                    _dlog.info("[diary] need_diary=True 但无完整话题卡命中 → 回退人设")
+            else:
+                diary_debug["mode"] = "本轮不需日记"
+                _dlog.info("[diary] 判断器: 本轮不需日记")
 
         # 2) RAG controlled by the plan (falls back to instance defaults when
         #    no controller is wired in).
@@ -484,8 +703,15 @@ class CharacterEngine:
         # 用户事实清单：长期记住用户的核心。清单本就很短（上限 ~40 条），所以
         # **较短时整份注入**（不靠 BM25），避免「换个说法问就检不到」——让主模型
         # 自己从完整清单里找。只有清单异常大时才退回 BM25 检索控量。
+        # 用户记忆注入。**优先用外部传入的 user_memory_text**（web 层从 EverMem
+        # 语义检索得到的「关于用户的记忆」文本）——这条路取代了原 user_facts 的
+        # BM25/整份注入，但**注入位置完全相同**（仍是下面 _build_user_content 的
+        # 「关于用户的记忆」块），主模型 prompt 模板一字不动。
+        # 没传 user_memory_text 时，回退原 user_facts 逻辑（兼容、兜底）。
         user_facts_text = ""
-        if user_facts:
+        if user_memory_text.strip():
+            user_facts_text = user_memory_text.strip()
+        elif user_facts:
             try:
                 from .user_facts import UserFactsStore
                 total = sum(len(v) for v in user_facts.values() if isinstance(v, list))
@@ -496,7 +722,14 @@ class CharacterEngine:
             except Exception:
                 user_facts_text = ""
         retrieve_k = plan.retrieve_k if self._controller is not None else self.retrieve_k
-        retrieved_raw = self.rag.retrieve(rag_query, k=retrieve_k) if retrieve_k > 0 else []
+        # 人设检索：启用 EverOS 时走 agent 轨道语义检索（取代 BM25），失败/空回退
+        # self.rag.retrieve。注入位置不变（下面「角色设定参考」块），CORE 人设不动。
+        retrieved_raw: list[Chunk] = []
+        if retrieve_k > 0:
+            if self.persona_memory.enabled:
+                retrieved_raw = self.persona_memory.retrieve(rag_query, k=retrieve_k)
+            if not retrieved_raw:
+                retrieved_raw = self.rag.retrieve(rag_query, k=retrieve_k)
         retrieved = (
             self._filter_chunks_by_plan(retrieved_raw, plan)
             if self._controller is not None
@@ -508,7 +741,7 @@ class CharacterEngine:
             plan.history_recall_k if self._controller is not None else self.history_retrieve_k
         )
         retrieved_history: list[Chunk] = []
-        if plan.use_history_recall and history_recall_k > 0:
+        if _HISTORY_RECALL_ON and plan.use_history_recall and history_recall_k > 0:
             retrieved_history = retrieve_history_chunks(
                 conversation.messages,
                 rag_query,
@@ -557,6 +790,8 @@ class CharacterEngine:
                     quoted_text=quoted_text,
                     self_facts_text=self_facts_text,
                     user_facts_text=user_facts_text,
+                    diary_text=diary_text,
+                    diary_continuation=diary_continuation,
                     # 上一轮 park 下来、还没说完的段（用户这轮插话）。交给主模型
                     # 自己判断接不接（见 _build_user_content）。仅 controller 模式下启用，
                     # 避免无 controller 的简单模式行为变化。
@@ -578,6 +813,11 @@ class CharacterEngine:
             "system_blocks": system_blocks,
             "plan": plan,
             "plan_trace": plan_trace,
+            "diary_debug": diary_debug,
+            "diary_text": diary_text,
+            # 调试用：把最终发给主模型的 system + messages 原样拼成可读文本，供右侧面板展示。
+            # 只读拼接，不改任何发送内容。
+            "final_prompt": _render_final_prompt(system_blocks, api_messages),
         }
 
     def _slid_out_turns(
@@ -605,6 +845,8 @@ class CharacterEngine:
         quoted_text: str = "",
         self_facts: dict | None = None,
         user_facts: dict | None = None,
+        user_memory_text: str = "",
+        diary_text: str = "",
     ) -> ChatResult:
         prep = self._prepare(
             conversation,
@@ -613,12 +855,16 @@ class CharacterEngine:
             quoted_text=quoted_text,
             self_facts=self_facts,
             user_facts=user_facts,
+            user_memory_text=user_memory_text,
+            diary_text=diary_text,
         )
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
         plan = prep["plan"]
         plan_trace = prep["plan_trace"]
+        diary_debug = prep.get("diary_debug")
+        final_prompt = prep.get("final_prompt")
         history_window = plan.history_window if self._controller is not None else self.history_window
 
         response = self.client.messages.create(
@@ -665,11 +911,13 @@ class CharacterEngine:
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             plan=plan.to_dict(),
             controller_trace=plan_trace,
+            diary_debug=diary_debug,
+            final_prompt=final_prompt,
             pending_segments=list(segments),
             slid_out_turns=slid_out,
         )
 
-    def chat_stream(self, conversation: Conversation, user_message: str, self_facts: dict | None = None, user_facts: dict | None = None):
+    def chat_stream(self, conversation: Conversation, user_message: str, self_facts: dict | None = None, user_facts: dict | None = None, user_memory_text: str = "", diary_text: str = ""):
         """Streaming counterpart to chat(). A generator yielding event dicts:
 
             {"type": "mood",  "mood": {...}|None}   — emitted once, as soon as
@@ -686,7 +934,7 @@ class CharacterEngine:
         aborting the Anthropic request, and nothing is saved. That matches the
         product rule: a barged-in turn is treated as a mistake and discarded.
         """
-        prep = self._prepare(conversation, user_message, self_facts=self_facts, user_facts=user_facts)
+        prep = self._prepare(conversation, user_message, self_facts=self_facts, user_facts=user_facts, user_memory_text=user_memory_text, diary_text=diary_text)
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
@@ -787,6 +1035,10 @@ class CharacterEngine:
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
             "pending_segments": list(segments),
+            # 调试面板字段（与非流式 /api/chat 对齐）：controller 判定、日记检索、最终 prompt。
+            "plan": prep["plan"].to_dict() if prep.get("plan") else None,
+            "diary_debug": prep.get("diary_debug"),
+            "final_prompt": prep.get("final_prompt"),
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", 0) or 0,
                 "output_tokens": getattr(usage, "output_tokens", 0) or 0,
@@ -952,7 +1204,7 @@ class CharacterEngine:
             plan.history_recall_k if self._controller is not None else self.history_retrieve_k
         )
         retrieved_history: list[Chunk] = []
-        if plan.use_history_recall and history_recall_k > 0 and rag_query:
+        if _HISTORY_RECALL_ON and plan.use_history_recall and history_recall_k > 0 and rag_query:
             retrieved_history = retrieve_history_chunks(
                 conversation.messages,
                 rag_query,

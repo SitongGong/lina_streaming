@@ -137,6 +137,25 @@ class LinaController:
         clash with a host that already has one running (Flask, anyio)."""
         return asyncio.run(self.dispatch(ctx))
 
+    def dispatch_and_match_sync(
+        self, ctx: LinaTurnContext, user_message: str,
+        recent_history: list[tuple[str, str]], topic_pool: dict | None,
+    ) -> tuple[LinaPromptPlan, dict]:
+        """**并发**跑 advisor 判定(dispatch) + 话题连续性判断器(match_topic)。
+
+        关键：二者**各用各的事件循环**（各自 asyncio.run），不能用同一个 gather——
+        因为 dispatch 的 advisor 绑在 self._client（旧循环），而 match_topic 用新建
+        临时 client；放同一新循环 gather 会让 dispatch 的 client 跨循环出错。
+        所以用**线程池**让两个 _sync 方法各跑各的循环、真正并行，互不干扰。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_plan = ex.submit(self.dispatch_sync, ctx)
+            f_m = ex.submit(self.match_topic_sync, user_message, recent_history, topic_pool)
+            plan = f_plan.result()
+            m = f_m.result()
+        return plan, m
+
     def update_self_facts_sync(
         self, current_facts: dict, sliding_turns: list[tuple[str, str]]
     ) -> dict | None:
@@ -195,6 +214,107 @@ class LinaController:
                 "update_self_facts failed: %s", f"{type(exc).__name__}: {exc}".rstrip(": ")
             )
             return None
+
+    def _fresh_async_client(self):
+        """新建一个临时 client（绑当前事件循环），结构与 self._client 一致。
+
+        self._client 的连接池绑在别的循环上，match_topic_sync 的新 asyncio.run 跨循环
+        用会 APIConnectionError。所以这里从原 client 提取连接参数，在当前循环重建。
+        """
+        if self._client is None:
+            return None
+        try:
+            inner = getattr(self._client, "_inner", self._client)  # 拆 shim 拿真 AsyncOpenAI
+            from openai import AsyncOpenAI
+            fresh = AsyncOpenAI(api_key=inner.api_key, base_url=str(inner.base_url))
+            # 若原 client 是 Anthropic 兼容 shim，新 client 也包同样的 shim（参数转换）
+            if isinstance(self._client, _AnthropicCompatClient):
+                return _AnthropicCompatClient(fresh)
+            return fresh
+        except Exception as exc:
+            logger.warning("_fresh_async_client failed: %s", exc)
+            return None
+
+    def match_topic_sync(
+        self, user_message: str, recent_history: list[tuple[str, str]], topic_pool: dict | None
+    ) -> dict:
+        """Sync wrapper for match_topic。"""
+        return asyncio.run(self.match_topic(user_message, recent_history, topic_pool))
+
+    async def match_topic(
+        self, user_message: str, recent_history: list[tuple[str, str]], topic_pool: dict | None
+    ) -> dict:
+        """话题连续性判断器：判断用户这轮是「接续池里某老话题」/「新话题」/「不需日记」。
+
+        返回 {need_diary, matched_topic_id, is_new_topic}。无 client/出错 → 安全兜底
+        （need_diary=False，不接续、不检索）。**核心：识别代词接续**（如上轮聊培根、
+        这轮「他还好吗」要能判出 matched_topic_id=培根），所以靠看上下文，而非检索命中。
+        """
+        fallback = {"need_diary": False, "matched_topic_id": None, "is_new_topic": False, "query_type": "global", "search_query": ""}
+        if self._client is None or not (user_message or "").strip():
+            return fallback
+        from ._prompts import load_prompt
+        from .experts import _render_history, _parse_json_object
+
+        template = load_prompt("controller/topic_continuity.txt")
+        if not template:
+            return fallback
+        # 话题池渲染成「标题（id）」列表给判断器
+        pool = topic_pool or {}
+        if pool:
+            pool_text = "\n".join(
+                f"- {v.get('title', tid)}（id: {tid}）" for tid, v in pool.items()
+            )
+        else:
+            pool_text = "(空，还没聊过任何莉娜的话题)"
+        prompt = template.format(
+            recent_history=_render_history(tuple(recent_history), limit=6),
+            topic_pool=pool_text,
+            user_message=user_message.strip()[:200],
+        )
+        # match_topic_sync 用 asyncio.run 开的是【新事件循环】，而 self._client(AsyncOpenAI)
+        # 的连接池绑在 dispatch 那个旧循环上，跨循环用会 APIConnectionError。所以这里
+        # 在当前循环内**新建一个临时 client**（连接参数从 self._client 提取），用完即弃。
+        client = self._fresh_async_client()
+        if client is None:
+            return fallback
+        # 给足超时（prompt 带历史+话题池，比单字段 advisor 长）；瞬时连接错重试一次。
+        deadline = max(4.0, self._advisor_timeout * 2)
+        last_exc = None
+        for attempt in range(2):
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=self._model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_completion_tokens=200,
+                        reasoning_effort="minimal",
+                        response_format={"type": "json_object"},
+                    ),
+                    timeout=deadline,
+                )
+                data = _parse_json_object((resp.choices[0].message.content or "").strip())
+                if not isinstance(data, dict):
+                    return fallback
+                mid = data.get("matched_topic_id")
+                if mid not in pool:  # 校验在池里，防幻觉造 id
+                    mid = None
+                sq = data.get("search_query")
+                sq = sq.strip() if isinstance(sq, str) and sq.strip() else ""
+                qt = data.get("query_type")
+                qt = qt if qt in ("detail", "global") else "global"  # 缺省按 global
+                return {
+                    "need_diary": bool(data.get("need_diary")),
+                    "matched_topic_id": mid,
+                    "is_new_topic": bool(data.get("is_new_topic")) and mid is None,
+                    "query_type": qt,
+                    "search_query": sq,  # 干净检索词；空则上层退回用 user_message
+                }
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(0.3)
+        logger.warning("match_topic failed: %s", f"{type(last_exc).__name__}: {last_exc}".rstrip(": "))
+        return fallback
 
     def update_user_facts_sync(
         self, current_facts: dict, sliding_turns: list[tuple[str, str]]
@@ -447,6 +567,7 @@ class LinaController:
             lenient_typos=merged.get("lenient_typos", True),
             user_positive=merged.get("user_positive", False),
             user_farewell=merged.get("user_farewell", False),
+            need_diary=merged.get("need_diary", False),
             sentences=merged.get("sentences", 2),
             max_reply_chars=merged.get("max_reply_chars", 45),
             allow_segment=merged.get("allow_segment", False),

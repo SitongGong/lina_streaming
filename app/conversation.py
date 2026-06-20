@@ -75,6 +75,13 @@ class Conversation:
     # when the user stays silent. Cleared the moment the user speaks again
     # (a new chat() turn) — a fresh message makes the old plan stale.
     pending_segments: list[str] | None = None
+    # 本会话「已聊话题池」：莉娜的日记/谈资话题一旦被检索过就缓存在这，供后续
+    # 追问/隔几轮绕回时复用，不重新检索——解决「追问就编 / 前后不一致」。
+    #   {topic_id: {"title": str, "diary_text": str(命中卡+精确日记的注入文本),
+    #               "turns": [聊过的轮序号]}}
+    # 只缓存「日记内容」（静态、不会变），对话进展不缓存（靠近期窗口+用户记忆）。
+    # 会话级、随会话持久化；单会话场景，不跨会话。
+    topic_pool: dict | None = None
 
     def add(self, role: str, content: str, meta: dict | None = None) -> Message:
         msg = Message(role=role, content=content, meta=meta)
@@ -109,6 +116,8 @@ class Conversation:
             d["client_id"] = self.client_id
         if self.pending_segments:
             d["pending_segments"] = self.pending_segments
+        if self.topic_pool:
+            d["topic_pool"] = self.topic_pool
         return d
 
     @classmethod
@@ -123,6 +132,7 @@ class Conversation:
             forced_state=d.get("forced_state"),
             client_id=d.get("client_id"),
             pending_segments=d.get("pending_segments"),
+            topic_pool=d.get("topic_pool"),
             messages=[Message.from_dict(m) for m in d.get("messages", [])],
         )
 

@@ -361,7 +361,9 @@ class LinaRuleRouter:
                 hook_callback=len(ctx.history) >= 2,
                 sentences=3,
                 max_reply_chars=70,
-                tone_hint="熟悉",
+                # tone 不再写死「熟悉」——否则新会话没这个用户记忆时也装熟、编「你来过几次」。
+                # 留空让主模型按【实际有没有关于用户的记忆】定调：有→熟悉，没有→诚实说想不起来。
+                tone_hint="",
                 enforce_mood_continuity=True,
                 trace_source="rule",
                 matched_rule="relationship_recall",
@@ -405,6 +407,7 @@ class LinaRuleRouter:
                 history_recall_k=2,
                 history_window=18,
                 module_self_introspection=True,
+                need_diary=True,   # 用户问莉娜自己/过去/经历 → 调日记，讲具体真事，别回避
                 hook_concrete_example=True,
                 allow_doubt_wrap=True,
                 sentences=3,

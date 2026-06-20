@@ -52,11 +52,12 @@ from .controller import (
 from .controller.merged_controller import MergedController
 from .conversation import Conversation, ConversationStore
 from .feedback import DIMENSIONS, FeedbackStore, MessageFeedbackStore
+from .diary_memory import DiaryMemory
+from .memory_client import MemoryClient
 from .rag import retrieve_user_memory_chunks
 from .self_facts import SelfFactsStore
 from .user_facts import UserFactsStore
-from .voice import get_voice_engine, mood_to_instruct
-from . import asta_tts
+from .voice import get_voice_engine, iter_sentences, mood_to_instruct
 
 
 # ---- Engine pool: one CharacterEngine per pinned prompt version. The
@@ -85,9 +86,58 @@ _admin_users = resolve_admin_users()
 _user_store = UserStore(USERS_FILE)
 # 莉娜对每个用户的「自我事实清单」（跨会话共享，按 user_id 存）。
 _self_facts_store = SelfFactsStore(USERS_FILE.parent / "self_facts")
+# self_facts（莉娜自我事实清单）开关：默认【关】。莉娜「自己的事」已由日记/谈资系统
+# 接管，self_facts 这条老路（BM25 注入 + 后台 LLM 提炼）与之重叠、且有把一次性剧情
+# 当稳定事实记下的风险，故默认禁用（代码保留，置 LINA_SELF_FACTS=1 可重新启用）。
+_SELF_FACTS_ON = os.environ.get("LINA_SELF_FACTS", "").strip() in ("1", "true", "True")
+
+
+def _load_self_facts(user_id: str) -> dict:
+    """开关关闭时一律返回空 → 不注入 self_facts；开启时正常加载。"""
+    return _self_facts_store.load(user_id) if _SELF_FACTS_ON else {}
 # 「用户事实清单」——记用户讲过的、关于他自己的稳定事实（跨会话共享，按 user_id 存）。
 # 解决「聊久了把用户的事忘了/记混/编造」。
 _user_facts_store = UserFactsStore(USERS_FILE.parent / "user_facts")
+
+# ---- EverMem 长期记忆（云服务，取代 user_facts 的「用户记忆」职责）----
+# 用 EverMem 的 hybrid 语义检索代替原 user_facts 的 BM25/整份注入：写入每轮对话、
+# 检索时按 user_id 拿「关于用户的记忆」文本注入（注入位置不变，主模型 prompt 不动）。
+# 没配 key（EVERMEM_API_KEY）时 enabled=False，自动回退原 user_facts，不影响现网。
+_memory_client = MemoryClient()
+
+# ---- 日记 + 谈资两级检索（本地 EverOS，agent 轨道）----
+# 莉娜的"自己设定的生活"。controller 判定本轮该找谈资时，两级检索（话题→日记）
+# 调出莉娜真实经历注入，用户提话题有真事可聊、主动找话有真素材，不乱编。
+# 没置 EVEROS_DIARY / 本地 EverOS 没起时 enabled=False，不影响现网。
+_diary_memory = DiaryMemory()
+
+
+def _spawn_memory_add(user_id: str, user_text: str, ai_text: str, session_id: str = "") -> None:
+    """后台线程：把这一轮对话写入 EverMem（不阻塞回复）。"""
+    if not _memory_client.enabled or not user_id:
+        return
+
+    def _work():
+        try:
+            _memory_client.add_turn(user_id, user_text, ai_text, session_id=session_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _spawn_memory_flush(user_id: str, session_id: str = "") -> None:
+    """后台线程：触发 EverMem 把缓冲消息提取成记忆（会话结束/滑出时）。"""
+    if not _memory_client.enabled or not user_id:
+        return
+
+    def _work():
+        try:
+            _memory_client.flush(user_id, session_id=session_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def _spawn_user_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
@@ -113,6 +163,8 @@ def _spawn_user_facts_update(user_id: str, current_facts: dict, slid_turns: list
 def _spawn_self_facts_update(user_id: str, current_facts: dict, slid_turns: list) -> None:
     """后台线程：让 controller LLM 把刚滑出窗口的几轮概括进该用户的自我事实清单。
     不阻塞 HTTP 响应。重新读一次清单避免覆盖并发写；store 自带锁。"""
+    if not _SELF_FACTS_ON:   # 默认关闭：不再后台提炼莉娜自我事实（日记系统已接管）
+        return
     if not user_id or not slid_turns:
         return
     ctrl = _ensure_controller()
@@ -135,6 +187,8 @@ def _spawn_self_facts_backfill(user_id: str) -> None:
     """登录后一次性回填：若清单还空、但该用户已有历史会话，把全部历史分批喂给
     controller LLM 提炼，补进自我事实清单。之后增量机制（滑出窗口）接管。
     后台线程跑，不阻塞登录响应；只在清单为空时跑，避免重复。"""
+    if not _SELF_FACTS_ON:   # 默认关闭：不再回填
+        return
     if not user_id:
         return
     ctrl = _ensure_controller()
@@ -279,6 +333,9 @@ PROMPT_COMPONENTS: list[tuple[str, str, str, str]] = [
     ("modules/hook_history_recall.txt", "模块·引用历史", "controller", "引用用户讲过的事。"),
     # controller 专用模板
     ("controller/proactive_topic.txt", "主动发言·挑话头", "controller", "用户沉默时挑哪个话头主动开口。"),
+    ("controller/topic_continuity.txt", "日记判别器·话题连续性", "controller",
+     "日记/谈资系统的判别器：判断用户这轮是接续老话题/开新话题/不涉及莉娜，并产出"
+     "干净检索词与问题类型(detail/global)，决定要不要调日记、调哪段。"),
     ("controller/self_facts.txt", "自我清单·提炼规则", "controller", "把莉娜说过的自我事实概括进清单的规则。"),
     ("controller/control_flag.txt", "微顾问·布尔判官模板", "controller", "每个布尔字段微顾问的 prompt 模板。"),
     ("controller/control_int.txt", "微顾问·数值判官模板", "controller", "数值字段微顾问的 prompt 模板。"),
@@ -334,11 +391,6 @@ _PROMPT_KEYS = {k for k, _, _, _ in PROMPT_COMPONENTS}
 OVERRIDES_DIR = PROJECT_ROOT / "prompt_overrides"
 OVERRIDES_FILE = OVERRIDES_DIR / "current.json"
 VERSIONS_DIR = OVERRIDES_DIR / "versions"
-# Explicitly-recorded active default version id. Without it, "which version is
-# the current default" was inferred by content-matching newest-first, so a newer
-# version with identical content would hijack the displayed name even when
-# nothing actually changed. This pointer makes the displayed default deterministic.
-ACTIVE_VERSION_FILE = OVERRIDES_DIR / "active_version_id"
 
 _overrides: dict[str, str] = {}
 _VERSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
@@ -532,62 +584,16 @@ def _sync_controller_overrides() -> None:
     reload_rule_patterns()
 
 
-def _read_active_version_id() -> str | None:
-    try:
-        if ACTIVE_VERSION_FILE.exists():
-            return ACTIVE_VERSION_FILE.read_text(encoding="utf-8").strip() or None
-    except Exception:
-        pass
-    return None
-
-
-def _write_active_version_id(version_id: str | None) -> None:
-    """Record (or clear) the explicitly-chosen active default version id."""
-    try:
-        if version_id:
-            ACTIVE_VERSION_FILE.write_text(version_id, encoding="utf-8")
-        elif ACTIVE_VERSION_FILE.exists():
-            ACTIVE_VERSION_FILE.unlink()
-    except Exception:
-        pass
-
-
 def _match_default_version() -> dict | None:
-    """Return the active global default version's {version_id, name}, or None
-    ("自定义") when the live default doesn't equal any saved version.
-
-    Prefers the explicitly-recorded active version (set on restore) as long as
-    it still matches the live `_overrides` — so a newer version with identical
-    content can't hijack the displayed name. Falls back to content-matching
-    (newest first) for defaults set before this pointer existed, or edited away
-    in the 提示词 tab (in which case nothing matches → None → "自定义")."""
+    """If the active global default (`_overrides`) exactly equals some saved
+    version's overrides, return that version's {version_id, name}; else None
+    ("自定义"). Self-correcting: editing the default in the 提示词 tab makes it
+    stop matching, so the UI never shows a stale version name."""
     cur = dict(_overrides)
-    pinned = _read_active_version_id()
-    if pinned:
-        data = _load_version(pinned)
-        if data is not None and dict(data.get("overrides", {})) == cur:
-            return {"version_id": pinned, "name": data.get("name", "")}
     for v in _list_versions():  # newest first
         data = _load_version(v["version_id"])
         if data is not None and dict(data.get("overrides", {})) == cur:
             return {"version_id": v["version_id"], "name": v.get("name", "")}
-    return None
-
-
-def _effective_prompt_version_id(conv) -> str | None:
-    """这个会话实际生效的 prompt 版本 id，用于给问卷/逐条反馈打标。
-
-    - 共享模式 + 已 pin 某版本 → 该版本 id。
-    - 共享模式 + 未 pin（跟随全局默认）→ 当前全局默认对应的已保存版本 id；
-      若默认是「自定义」（不匹配任何已保存版本）则为 None。
-      ——这一支正是之前漏标的常见情况：直接存 conv.prompt_version_id 会得到 None。
-    - 私有模式 → None（用的是会话内联自定义 prompt，由 prompt_mode="private" 标识）。
-    """
-    if conv.prompt_mode == "shared":
-        if conv.prompt_version_id:
-            return conv.prompt_version_id
-        matched = _match_default_version()
-        return matched["version_id"] if matched else None
     return None
 
 
@@ -691,13 +697,17 @@ def _require_admin():
     return None
 
 
+# 跨会话记忆开关：默认【关】。它会扫同账号的其它会话拉记忆进来，导致新 session 出现
+# 「你来过几次/眼熟/又问这个」这种串台，与「新会话=全新莉娜」冲突。需要时置
+# CROSS_SESSION_MEMORY=1 开启。（用户对话记忆已由 EverMem 按 session 隔离接管。）
+_CROSS_SESSION_ON = os.environ.get("CROSS_SESSION_MEMORY", "").strip() in ("1", "true", "True")
+
+
 def _cross_session_memory(cid: str | None, current_session_id: str, query: str, k: int = 3):
     """跨会话长期记忆：检索**同一 client_id** 的其它会话里讲过的事。
 
-    严格按 client_id 过滤 → 不同用户（不同浏览器 id）的会话物理隔离，
-    一个用户绝不会检索到另一个用户的记忆。cid 为空（匿名/curl）时不检索，
-    避免把所有匿名会话混在一起。"""
-    if not cid or not query.strip():
+    默认关闭（_CROSS_SESSION_ON）——避免新会话串台。严格按 client_id 过滤。"""
+    if not _CROSS_SESSION_ON or not cid or not query.strip():
         return []
     own = [c for c in _store.iter_sessions() if getattr(c, "client_id", None) == cid]
     if not own:
@@ -1282,23 +1292,44 @@ def create_app() -> Flask:
 
         # 跨会话用户记忆：让莉娜记住该用户（同 client_id）在别的会话里讲过的事。
         extra_memory = _cross_session_memory(cid, session_id, message)
-        # 莉娜的自我事实清单（按 user_id 跨会话共享）——注入让她对自己说过的话一致。
-        self_facts = _self_facts_store.load(cid)
+        # 记忆隔离键：cid::session_id —— 新会话=全新莉娜，self_facts/user_facts/EverMem
+        # 都按它隔离，避免上个 session 的近况/承诺带进来（导致「你又问这个」这种串台）。
+        mem_uid = f"{cid}::{session_id or 'default'}"
+        # 莉娜的自我事实清单（按会话隔离）——注入让她对自己说过的话一致。
+        self_facts = _load_self_facts(mem_uid)
         # 用户事实清单——注入让她记得用户是谁、聊过什么（跨上百轮不忘/不混/不编）。
-        user_facts = _user_facts_store.load(cid)
+        user_facts = _user_facts_store.load(mem_uid)
+        # EverMem 长期记忆（启用时）：按本轮消息语义检索「关于用户的记忆」，注入到
+        # 与 user_facts 完全相同的位置。enabled 时优先用它（_prepare 内 user_memory_text
+        # 优先于 user_facts），未启用则 user_memory_text 为空、自动回退 user_facts。
+        user_memory_text = ""
+        if _memory_client.enabled:
+            try:
+                user_memory_text = _memory_client.search_text(mem_uid, message, top_k=10)
+            except Exception:
+                user_memory_text = ""
 
+        # 日记/谈资检索由 engine 内部按 plan.need_diary 门控（见 character.py _prepare）：
+        # controller 判定本轮该调莉娜生活经历时才两级检索，省开销。这里不再预检索。
         try:
             result = engine.chat(
                 conv, message, extra_memory_chunks=extra_memory,
                 quoted_text=quoted_text, self_facts=self_facts, user_facts=user_facts,
+                user_memory_text=user_memory_text,
             )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
         _store.save(conv)
+        # EverMem：把这一轮对话写入云记忆（后台，不阻塞）。user_id 用 mem_uid（按会话隔离）。
+        _spawn_memory_add(mem_uid, message, result.text, session_id=session_id or cid)
         # 自我/用户事实清单：若有轮次刚滑出窗口，在**后台线程**概括更新（不阻塞本次回复）。
         if result.slid_out_turns:
-            _spawn_self_facts_update(cid, dict(self_facts or {}), list(result.slid_out_turns))
-            _spawn_user_facts_update(cid, dict(user_facts or {}), list(result.slid_out_turns))
+            _spawn_self_facts_update(mem_uid, dict(self_facts or {}), list(result.slid_out_turns))
+            # EverMem 启用时，用户记忆由 EverMem 接管，跳过原 user_facts 后台概括（省 LLM）。
+            if not _memory_client.enabled:
+                _spawn_user_facts_update(mem_uid, dict(user_facts or {}), list(result.slid_out_turns))
+            # 有轮次滑出 → 触发 EverMem 提取，让旧对话尽快沉淀成可检索记忆。
+            _spawn_memory_flush(mem_uid, session_id=session_id or cid)
 
         return jsonify(
             {
@@ -1319,6 +1350,8 @@ def create_app() -> Flask:
                 ],
                 "plan": result.plan,
                 "controller_trace": result.controller_trace,
+                "diary_debug": result.diary_debug,
+                "final_prompt": result.final_prompt,
                 "pending_segments": result.pending_segments,
                 "has_more_segments": bool(result.pending_segments),
                 "usage": {
@@ -1366,6 +1399,8 @@ def create_app() -> Flask:
                 "mood": result.mood,
                 "plan": result.plan,
                 "controller_trace": result.controller_trace,
+                "diary_debug": result.diary_debug,
+                "final_prompt": result.final_prompt,
                 "pending_segments": result.pending_segments,
                 "has_more_segments": bool(result.pending_segments),
                 "usage": {
@@ -1408,8 +1443,9 @@ def create_app() -> Flask:
         engine = _engine_for_session(conv, cid)
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
-        proactive_user_facts = _user_facts_store.load(cid)   # 参考用户长期记忆
-        proactive_self_facts = _self_facts_store.load(cid)   # 参考莉娜自己的设定，避免自相矛盾
+        p_uid = f"{cid}::{session_id or 'default'}"   # 记忆按会话隔离，与 chat 一致
+        proactive_user_facts = _user_facts_store.load(p_uid)   # 参考用户长期记忆
+        proactive_self_facts = _load_self_facts(p_uid)   # 参考莉娜自己的设定，避免自相矛盾
         try:
             if mode == "farewell":
                 result = engine.proactive_farewell(conv, user_facts=proactive_user_facts, self_facts=proactive_self_facts)
@@ -1421,8 +1457,8 @@ def create_app() -> Flask:
         # 注意：主动发言的内容**不再喂进记忆清单**（_run_proactive 已返回空 slid_out），
         # 避免即兴话头污染记忆 / 与之前说过的冲突。下面这个分支因此基本不触发。
         if result.slid_out_turns:
-            _spawn_self_facts_update(cid, dict(_self_facts_store.load(cid)), list(result.slid_out_turns))
-            _spawn_user_facts_update(cid, dict(_user_facts_store.load(cid)), list(result.slid_out_turns))
+            _spawn_self_facts_update(p_uid, dict(_self_facts_store.load(p_uid)), list(result.slid_out_turns))
+            _spawn_user_facts_update(p_uid, dict(_user_facts_store.load(p_uid)), list(result.slid_out_turns))
 
         # 真正是不是告别，由后端权威计数决定（可能覆盖了请求的 mode）。读最后一条
         # assistant 的 meta 为准，让前端据此停止后续主动。
@@ -1515,12 +1551,12 @@ def create_app() -> Flask:
     def voice_chat():
         """Streaming voice reply over SSE.
 
-        Streams Claude's tokens as `delta` events for live captions; when the
-        reply is complete it synthesizes the WHOLE reply once via the remote
-        *asta* engine (fixed joy) and emits it as a single base64 `audio` event
-        — so a mic reply uses the SAME audio as text chat (asta joy), not the
-        local qwen-tts. If the client aborts (barge-in), the generator is
-        closed, the upstream Claude stream is aborted, and nothing is persisted."""
+        Streams Claude's tokens as `delta` events for live captions, and — as
+        each spoken sentence completes — synthesizes it and emits the audio as
+        a base64 `audio` event so playback begins on sentence #1 rather than
+        after the whole reply. If the client aborts the request (the barge-in
+        interrupt), the generator is closed, the upstream Claude stream is
+        aborted, and nothing is persisted."""
         cid = _client_id() or _ANON_CLIENT
         if not _client_ready(cid):
             return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
@@ -1537,12 +1573,35 @@ def create_app() -> Flask:
         if engine is None:
             return jsonify({"ok": False, "error": "引擎未就绪"}), 401
 
-        voice_self_facts = _self_facts_store.load(cid)  # 注入自我事实（语音路径只读不更新）
+        ve = get_voice_engine()
+        tts_ready = ve.status()["state"] == "ready"
+        voice_self_facts = _load_self_facts(f"{cid}::{session_id or 'default'}")  # 自我事实（按会话隔离，只读）
 
         def event_stream():
             gen = engine.chat_stream(conv, message, self_facts=voice_self_facts)
-            cur_mood = None     # latest parsed mood (forwarded to client for UI)
-            full_text = ""      # accumulate the spoken reply from delta events
+            pending = ""        # visible text not yet flushed to a TTS sentence
+            cur_mood = None     # latest parsed mood — drives TTS delivery style
+            idx = 0             # audio chunk ordering index
+
+            def synth(sentence: str):
+                nonlocal idx
+                if not tts_ready:
+                    return None
+                try:
+                    wav_bytes, _sr = ve.synthesize(sentence, mood_to_instruct(cur_mood))
+                except Exception:
+                    return None
+                if not wav_bytes:
+                    return None
+                ev = {
+                    "type": "audio",
+                    "index": idx,
+                    "text": sentence,
+                    "mime": "audio/wav",
+                    "audio": base64.b64encode(wav_bytes).decode("ascii"),
+                }
+                idx += 1
+                return ev
 
             try:
                 for ev in gen:
@@ -1551,28 +1610,22 @@ def create_app() -> Flask:
                         cur_mood = ev.get("mood")
                         yield _sse({"type": "mood", "mood": cur_mood})
                     elif etype == "delta":
-                        # Stream text for live captions only; the reply is voiced
-                        # once at the end (whole message) via the remote asta
-                        # engine, so the mic reply uses the SAME audio as text
-                        # chat (asta joy) instead of the local qwen-tts.
-                        full_text += ev["text"]
                         yield _sse({"type": "delta", "text": ev["text"]})
+                        pending += ev["text"]
+                        sentences, pending = iter_sentences(pending)
+                        for s in sentences:
+                            audio_ev = synth(s)
+                            if audio_ev:
+                                yield _sse(audio_ev)
                     elif etype == "done":
+                        # Speak whatever's left in the buffer as a last chunk.
+                        sentences, pending = iter_sentences(pending, flush=True)
+                        for s in sentences:
+                            audio_ev = synth(s)
+                            if audio_ev:
+                                yield _sse(audio_ev)
                         # engine.chat_stream has now mutated conv; persist it.
                         _store.save(conv)
-                        full = (ev.get("text") or full_text or "").strip()
-                        try:
-                            wav = asta_tts.synthesize(full)
-                            if wav:
-                                yield _sse({
-                                    "type": "audio",
-                                    "index": 0,
-                                    "text": full,
-                                    "mime": "audio/wav",
-                                    "audio": base64.b64encode(wav).decode("ascii"),
-                                })
-                        except Exception:
-                            pass  # best-effort; captions already shown
                         yield _sse(
                             {
                                 "type": "done",
@@ -1589,6 +1642,10 @@ def create_app() -> Flask:
                                     {"source": c.source, "heading": c.heading, "text": c.text}
                                     for c in ev.get("retrieved_history", [])
                                 ],
+                                # 调试面板字段（语音流若 chat_stream 透出则显示，否则前端自动留空）
+                                "plan": ev.get("plan"),
+                                "diary_debug": ev.get("diary_debug"),
+                                "final_prompt": ev.get("final_prompt"),
                             }
                         )
             except Exception as e:  # noqa: BLE001 — surface mid-stream errors
@@ -1608,28 +1665,6 @@ def create_app() -> Flask:
                 "Connection": "keep-alive",
             },
         )
-
-    @app.route("/api/tts/say", methods=["POST"])
-    def tts_say():
-        """Single-shot TTS of a whole message via the remote *asta* engine
-        (fixed emotion=joy), returning one WAV. Used by the per-message 🔊 replay
-        so a replay uses the same asta voice as fresh replies (the client caches
-        it per message). No local GPU needed. Gated like /api/voice/say."""
-        cid = _client_id() or _ANON_CLIENT
-        if not _client_ready(cid):
-            return jsonify({"ok": False, "error": "请先连接 Anthropic API Key。"}), 401
-        data = request.get_json(force=True, silent=True) or {}
-        text = (data.get("text") or "").strip()
-        if not text:
-            return jsonify({"ok": False, "error": "文本为空"}), 400
-        text = text[:2000]
-        try:
-            wav = asta_tts.synthesize(text)
-        except Exception as e:  # noqa: BLE001
-            return jsonify({"ok": False, "error": str(e)}), 502
-        if not wav:
-            return jsonify({"ok": False, "error": "合成为空"}), 502
-        return Response(wav, mimetype="audio/wav")
 
     # ---------- Post-evaluation questionnaire ----------
     # A tester rates Lina on nine dimensions (good/bad + reason) plus a
@@ -1682,8 +1717,7 @@ def create_app() -> Flask:
         if _store._path(session_id).exists():
             conv = _store.load(session_id)
             session_title = conv.title
-            # 跟随全局默认的共享会话，要解析出当时实际生效的默认版本，别只存 None。
-            prompt_version_id = _effective_prompt_version_id(conv)
+            prompt_version_id = conv.prompt_version_id
             prompt_mode = conv.prompt_mode
             message_count = len(conv.messages)
             if conv.messages:
@@ -1731,7 +1765,7 @@ def create_app() -> Flask:
         if _store._path(session_id).exists():
             conv = _store.load(session_id)
             session_title = conv.title
-            prompt_version_id = _effective_prompt_version_id(conv)
+            prompt_version_id = conv.prompt_version_id
         try:
             entry = _msg_feedback_store.set(
                 session_id=session_id,
@@ -1887,7 +1921,6 @@ def create_app() -> Flask:
         _overrides.clear()
         _overrides.update(data.get("overrides", {}))
         _save_overrides_to_disk(_overrides)
-        _write_active_version_id(version_id)  # 显式记录所选版本，避免同内容新快照抢占显示名
         _invalidate_current_engine()
         return jsonify({"ok": True, "override_count": len(_overrides)})
 

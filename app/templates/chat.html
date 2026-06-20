@@ -645,9 +645,34 @@
     margin: 0 0 4px;
   }
   .rail .rail-sub {
-    font-size: 12px; color: var(--ink-faint); margin-bottom: 16px;
+    font-size: 12px; color: var(--ink-faint); margin-bottom: 8px;
     font-style: italic;
   }
+  /* 调试分框：各自可滚动，限制高度，避免一个框撑满整侧 */
+  .debug-box {
+    max-height: 240px; overflow-y: auto;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255,253,247,0.6); padding: 8px; margin-bottom: 4px;
+    font-size: 12px;
+  }
+  .debug-box:empty::before { content: "（发消息后显示）"; color: var(--ink-faint); font-style: italic; }
+  /* 最终拼给主模型的完整 prompt：很长，固定高度 + 滚动，等宽字体保留换行与缩进。 */
+  .prompt-box {
+    max-height: 360px; overflow: auto;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(255,253,247,0.6); padding: 8px; margin-bottom: 4px;
+    font-size: 11px; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .prompt-box:empty::before { content: "（发消息后显示）"; color: var(--ink-faint); font-style: italic; }
+  .dbg-row { display: flex; gap: 6px; padding: 2px 0; border-bottom: 1px dashed rgba(0,0,0,0.06); }
+  .dbg-k { color: var(--ink-faint); min-width: 86px; flex-shrink: 0; }
+  .dbg-v { color: var(--ink); word-break: break-all; }
+  .dbg-v.t { color: #2e7d32; font-weight: 600; }   /* true */
+  .dbg-v.f { color: #b0875a; }                      /* false */
+  .dbg-tag { display:inline-block; background: var(--gold); color:#fff;
+    border-radius: 4px; padding: 0 6px; font-size: 11px; margin: 1px; }
   .chunk {
     background: rgba(255,253,247,0.85);
     border: 1px solid var(--line);
@@ -1435,10 +1460,6 @@
   .fb-section-title:first-child { margin-top: 0; }
   .fb-sum-reasons .reason-text .msg-excerpt { color: var(--ink-soft); }
   .fb-sum-reasons .reason-text .msg-reason { color: var(--accent); margin-left: 4px; }
-  /* 问卷上方：用户本次对话的 👍/👎 回顾 */
-  .myfb-recap { margin: 10px 14px 0; border: 1px solid var(--line); border-radius: 8px; background: rgba(176,132,56,0.07); overflow: hidden; }
-  .myfb-recap-head { padding: 8px 12px; font-size: 12.5px; color: var(--ink-soft); border-bottom: 1px solid var(--line); }
-  .myfb-recap .fb-sum-reasons { max-height: 200px; overflow-y: auto; padding: 4px 12px 8px; }
   /* 维度标签（汇总页 + 逐条条目）+ 维度赞踩分解条 */
   .dim-tag {
     display: inline-block; font-family: "JetBrains Mono", monospace; font-size: 10px;
@@ -1596,9 +1617,21 @@
   </main>
 
   <aside class="rail">
-    <h3>检索资料</h3>
+    <h3>Controller 判定</h3>
+    <div class="rail-sub">本轮 controller 判定的场景、参数与开关。</div>
+    <div id="ctrl-debug" class="debug-box"></div>
+
+    <h3 style="margin-top:14px;">日记 / 话题检索</h3>
+    <div class="rail-sub">是否调日记、问题类型、命中的话题与日记编号、新/旧话题。</div>
+    <div id="diary-debug" class="debug-box"></div>
+
+    <h3 style="margin-top:14px;">检索资料</h3>
     <div class="rail-sub">RAG 为本轮检索到的设定片段与历史记忆。</div>
-    <div id="chunks"></div>
+    <div id="chunks" class="debug-box"></div>
+
+    <h3 style="margin-top:14px;">最终 Prompt</h3>
+    <div class="rail-sub">本轮最终拼好、实际发给主模型的完整 system + messages（很长，可滚动）。</div>
+    <div id="final-prompt" class="prompt-box"></div>
     <div class="usage" id="usage" style="display:none;"></div>
   </aside>
 </div>
@@ -1677,7 +1710,6 @@
       <div class="status" id="feedback-modal-status">对每个维度选择「好 / 不好」，选「不好」时请填写原因。</div>
     </div>
     <div class="modal-body">
-      <div id="feedback-myfb"></div>
       <div id="feedback-form"></div>
     </div>
     <div class="modal-foot">
@@ -2336,6 +2368,53 @@ function scrollToBottom() {
   root.scrollTop = root.scrollHeight;
 }
 
+// 右侧调试面板：渲染 controller 判定 + 日记/话题检索决策。
+function _dbgRow(box, k, v) {
+  const row = document.createElement('div'); row.className = 'dbg-row';
+  let cls = 'dbg-v';
+  if (v === true) { v = 'true'; cls += ' t'; }
+  else if (v === false) { v = 'false'; cls += ' f'; }
+  row.innerHTML = `<span class="dbg-k">${escapeHtml(String(k))}</span>`;
+  const vs = document.createElement('span'); vs.className = cls;
+  if (Array.isArray(v)) {
+    vs.innerHTML = v.length ? v.map(x => `<span class="dbg-tag">${escapeHtml(String(x))}</span>`).join('') : '（无）';
+  } else { vs.textContent = (v === undefined || v === null || v === '') ? '—' : String(v); }
+  row.appendChild(vs); box.appendChild(row);
+}
+
+function renderDebug(plan, diaryDebug, finalPrompt) {
+  // ① controller 判定框：场景 + 关键参数/开关（true/false）
+  const cb = $('ctrl-debug'); cb.innerHTML = '';
+  if (plan && typeof plan === 'object') {
+    const keyOrder = ['matched_rule','tone_hint','need_diary','query_type','user_farewell',
+      'use_self_facts','use_history_recall','suppress_trailing_question','lenient_typos',
+      'user_positive','allow_segment','sentences','max_reply_chars','query_hint'];
+    keyOrder.forEach(k => { if (k in plan) _dbgRow(cb, k, plan[k]); });
+    // 其余字段也列出来（不漏）
+    Object.keys(plan).forEach(k => { if (!keyOrder.includes(k)) _dbgRow(cb, k, plan[k]); });
+  }
+  // ② 日记/话题检索框（仅 lina_evermemos 有 diary_debug）
+  const db = $('diary-debug'); db.innerHTML = '';
+  if (diaryDebug && typeof diaryDebug === 'object' && Object.keys(diaryDebug).length) {
+    [['enabled','日记功能'],['need_diary','要不要调日记'],['query_type','问题类型(detail/global)'],
+     ['mode','检索方式'],['search_query','检索词'],['topic','命中话题'],
+     ['hit_topics','命中话题'],['hit_diary_ids','命中日记编号'],
+     ['locked_diary_ids','锁定日记编号'],['new_added','本轮新增']
+    ].forEach(([k,label]) => { if (k in diaryDebug) _dbgRow(db, label, diaryDebug[k]); });
+  } else {
+    db.innerHTML = '<div style="color:var(--ink-faint);font-style:italic;">（本项目无 / 本轮未检索日记）</div>';
+  }
+  // ③ 最终 prompt 框：实际发给主模型的完整 system + messages（很长，框内滚动查看）
+  const fp = $('final-prompt');
+  if (fp) {
+    if (finalPrompt && typeof finalPrompt === 'string') {
+      fp.textContent = finalPrompt;  // textContent 防 XSS、原样保留换行
+    } else {
+      fp.innerHTML = '<span style="color:var(--ink-faint);font-style:italic;">（本轮无 / 未启用）</span>';
+    }
+  }
+}
+
 function renderChunks(staticChunks, historyChunks) {
   const root = $('chunks');
   root.innerHTML = '';
@@ -2430,8 +2509,9 @@ async function send() {
     renderForcedPill(data.forced_state);  // None after consumption clears the pill
     state.lastMeta = data.mood || state.lastMeta;
     renderChunks(data.retrieved, data.retrieved_history);
+    renderDebug(data.plan, data.diary_debug, data.final_prompt);
     renderUsage(data.usage);
-    speakText(data.reply, data.mood, { interrupt: true, el: typingEl });  // 文字输入也朗读（音频缓存到该气泡，🔊 复用同一条）
+    speakText(data.reply, data.mood, { interrupt: true });  // 文字输入也朗读
     // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
     // 由续说计时器一段段补完。新一轮发送会覆盖它（旧 plan 自然作废）。
     state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
@@ -2684,45 +2764,7 @@ async function openFeedbackModal() {
   $('feedback-modal-name').textContent = '(' + state.currentSession + ')';
   $('feedback-form-hint').textContent = '';
   renderFeedbackForm();
-  renderMyFeedbackSummary(dims);  // 在问卷上方汇总用户本次对话的 👍/👎，帮其回忆当时的感受和例子
   $('feedback-modal').classList.add('active');
-}
-
-// 把当前会话里"用户自己点过的 👍/👎（含维度/例子/理由）"汇总在问卷上方，
-// 解决"聊了很多轮后填问卷时记不起之前的感受和例子"。纯展示，数据来自已有的
-// /api/message-feedback/<sid> 端点（即每条消息旁赞踩的存档），不改后端。
-async function renderMyFeedbackSummary(dims) {
-  const box = $('feedback-myfb');
-  box.innerHTML = '';                       // 先清空，避免上一个会话的回顾残留
-  if (!state.currentSession) return;
-  let items = [];
-  try {
-    const data = await api('/api/message-feedback/' + encodeURIComponent(state.currentSession));
-    items = data.items || [];
-  } catch (e) { return; }                    // 取不到就安静地不显示
-  if (!items.length) return;                 // 本次没点过赞踩就不占地方
-  const labelMap = {};
-  (dims || []).forEach(d => { labelMap[d.key] = d.label; });
-  labelMap.other = '其他';
-  items.sort((a, b) => (a.ts || 0) - (b.ts || 0));   // 按时间正序，便于顺着回忆
-  const up = items.filter(i => i.rating === 'up').length;
-  const down = items.filter(i => i.rating === 'down').length;
-  const rows = items.map(it => {
-    const dimLabel = it.dimension ? (labelMap[it.dimension] || it.dimension) : '';
-    return `<div class="reason-item">
-      <span class="tag ${it.rating === 'up' ? 'good' : 'bad'}">${it.rating === 'up' ? '👍' : '👎'}</span>
-      <span class="reason-text">
-        ${dimLabel ? `<span class="dim-tag">${escapeHtml(dimLabel)}</span>` : ''}
-        <span class="msg-excerpt">${escapeHtml(it.text || '（无正文）')}</span>
-        ${it.reason ? `<span class="msg-reason">— ${escapeHtml(it.reason)}</span>` : ''}
-      </span>
-    </div>`;
-  }).join('');
-  box.innerHTML = `
-    <div class="myfb-recap">
-      <div class="myfb-recap-head">📝 你在这次对话里标记过 <strong>👍 ${up} · 👎 ${down}</strong>，填问卷时可对照参考：</div>
-      <div class="fb-sum-reasons">${rows}</div>
-    </div>`;
 }
 
 function closeFeedbackModal() {
@@ -2881,7 +2923,7 @@ function renderFeedbackSummary(qData, mData) {
         <span class="msg-excerpt">${escapeHtml(it.text || '（无正文）')}</span>
         ${it.reason ? `<span class="msg-reason">— ${escapeHtml(it.reason)}</span>` : ''}
       </span>
-      <span class="reason-src" title="${escapeHtml(it.session_id)}">${it.user_id ? '👤' + escapeHtml(it.user_id) + ' · ' : ''}${escapeHtml(_fbLocLabel(it))}</span>
+      <span class="reason-src" title="${escapeHtml(it.session_id)}">${escapeHtml(_fbLocLabel(it))}</span>
     </div>`).join('');
   // 按维度拆分的赞踩计数（本次新增）
   const dimBreak = (mData.by_dimension || []).map(b => `
@@ -3038,8 +3080,8 @@ function renderPromptsList(components) {
         <div class="card-diff-bar">
           <span>对比基线</span>
           <select class="diff-base">
-            <option value="applied">当前默认（已应用）</option>
-            <option value="default">仓库原始（未覆盖）</option>
+            <option value="default">仓库默认</option>
+            <option value="applied">已应用</option>
           </select>
           <span class="grow"></span>
           <span class="diff-stat"></span>
@@ -3063,12 +3105,6 @@ function renderPromptsList(components) {
     const diffToggle = card.querySelector('.diff-toggle');
     const diffPanel = card.querySelector('.card-diff');
     const diffBaseSel = card.querySelector('.diff-base');
-    // Name the active-default baseline after the actual default version (the
-    // topbar "默认" tag), so it's unmistakable which prompt it diffs against —
-    // and not confused with the repo baseline ("仓库原始").
-    const _appliedOpt = diffBaseSel.querySelector('option[value="applied"]');
-    const _dpName = state.defaultPrompt && state.defaultPrompt.name;
-    if (_appliedOpt) _appliedOpt.textContent = _dpName ? `当前默认（${_dpName}）` : '当前默认（已应用）';
     const diffRowsEl = card.querySelector('.card-diff .diff-rows');
     const diffColHead = card.querySelector('.diff-col-head');
     const diffStat = card.querySelector('.diff-stat');
@@ -3787,35 +3823,25 @@ function stopAudio() {
   voice.playing = false;
 }
 
-// Speak an assistant message via the remote *asta* TTS engine over HTTP
-// (/api/tts/say): ONE single-shot call for the WHOLE message with a fixed
-// "joy" emotion — the SAME path the 🔊 replay uses, so auto-narration and a
-// later replay sound identical (whole-message prosody, not chopped per
-// sentence). No local GPU needed (works regardless of voice.modelState, which
-// only tracks the mic path's local qwen models). When `opts.el` is the
-// assistant message element, the synthesized audio is cached on it
-// (el.__audioUrl) so clicking 🔊 replays the EXACT same audio instead of
-// re-synthesizing. Best-effort: silent if asta is unreachable (text already
-// shown). `opts.interrupt` stops any current/queued audio first. `mood` is
-// accepted for call-site compatibility but unused (asta uses the fixed emotion).
+// Speak an assistant message via TTS into the playback queue, so TEXT replies
+// (and continuation / proactive messages) are voiced too — not just the voice
+// path. Best-effort: silently no-ops when the voice models aren't loaded, so
+// text chat still works when TTS is unavailable. `opts.interrupt` stops any
+// currently-playing/queued audio first (used for a fresh user turn).
 async function speakText(text, mood, opts = {}) {
+  if (voice.modelState !== 'ready') return;
   const t = (text || '').trim();
   if (!t) return;
-  if (opts.interrupt) stopAudio();
   try {
-    const res = await fetch('/api/tts/say', {
+    const res = await fetch('/api/voice/say', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-      body: JSON.stringify({ text: t }),
+      body: JSON.stringify({ text: t, mood: mood || null }),
     });
-    if (!res.ok) return;   // synthesis unavailable — text already shown, stay silent
-    const blob = await res.blob();
-    // Cache a SEPARATE object URL on the bubble for the 🔊 replay. The URL we
-    // queue for immediate playback gets revoked by playNextAudio when it ends,
-    // so caching that same URL would leave 🔊 with a dead (revoked) URL → no
-    // sound. Two URLs from one blob are independent; revoking one keeps the other.
-    if (opts.el) opts.el.__audioUrl = URL.createObjectURL(blob);
-    voice.audioQueue.push(URL.createObjectURL(blob));
+    if (!res.ok) return;   // synthesis failed — text is already shown, stay silent
+    const url = URL.createObjectURL(await res.blob());
+    if (opts.interrupt) stopAudio();
+    voice.audioQueue.push(url);
     playNextAudio();
   } catch (e) { /* best-effort; text already shown */ }
 }
@@ -3836,16 +3862,18 @@ function playReplay(url, btn) {
 async function replayMessage(wrap, btn) {
   const text = (wrap.querySelector('.content')?.textContent || '').trim();
   if (!text) return;
+  if (voice.modelState !== 'ready') {
+    toast(voice.modelState === 'loading' ? '语音模型加载中，请稍候…' : '语音模型未就绪，无法朗读。');
+    return;
+  }
   // Cached from a previous replay of this exact message → instant.
   if (wrap.__audioUrl) { playReplay(wrap.__audioUrl, btn); return; }
   btn.classList.add('loading'); btn.disabled = true;
   try {
-    // Use the remote asta TTS (fixed joy) so a replay matches the voice of
-    // fresh replies; no local GPU model needed. Cached per message below.
-    const res = await fetch('/api/tts/say', {
+    const res = await fetch('/api/voice/say', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, mood: wrap.__meta || null }),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
@@ -3995,6 +4023,7 @@ async function streamVoiceReply(text) {
           if (ev.mood) { setBubbleMood(assistantEl, ev.mood); renderStateBar(ev.mood); }
           renderForcedPill(ev.forced_state || null);
           renderChunks(ev.retrieved, ev.retrieved_history);
+          renderDebug(ev.plan, ev.diary_debug, ev.final_prompt);
           renderUsage(ev.usage);
           await loadSessions();
           maybeAutoSurvey();   // 每 50 轮自动弹问卷
@@ -4118,7 +4147,7 @@ async function runContinue() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
-      speakText(data.reply, data.mood, { el: wrap });  // 续说段也朗读（接在上一段之后播）
+      speakText(data.reply, data.mood);  // 续说段也朗读（接在上一段之后播）
       state.pendingSegments = Array.isArray(data.pending_segments) ? data.pending_segments : [];
       await loadSessions();
       scrollToBottom();
@@ -4156,7 +4185,7 @@ async function runProactive() {
       renderStateBar(data.mood);
       state.lastMeta = data.mood || state.lastMeta;
       if (data.usage) renderUsage(data.usage);
-      speakText(data.reply, data.mood, { el: wrap });  // 主动找话也朗读
+      speakText(data.reply, data.mood);  // 主动找话也朗读
       await loadSessions();
       scrollToBottom();
       // 告别了就把计数拉满 → 之后 maybeProactive 不再发起；否则推进一档。

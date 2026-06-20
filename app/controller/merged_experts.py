@@ -32,11 +32,12 @@ GROUPS: dict[str, list[str]] = {
     "style": ["tone_hint", "sentences", "max_reply_chars", "allow_segment"],
     "behavior": [
         "suppress_trailing_question", "lenient_typos", "user_positive",
-        "allow_doubt_wrap", "enforce_mood_continuity", "user_farewell",
+        "allow_doubt_wrap", "enforce_mood_continuity",
     ],
     "retrieval": [
         "use_self_facts", "query_hint", "history_window",
         "hook_history_recall", "hook_callback", "hook_concrete_example",
+        "need_diary",
     ],
 }
 

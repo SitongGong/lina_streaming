@@ -103,9 +103,11 @@ def _render_history(history: tuple[tuple[str, str], ...], limit: int = 3) -> str
         return "(无历史)"
     visible = history[-limit:]
     lines: list[str] = []
+    # 用明确中文标注说话人，而非隐晦的 U:/A:——否则挑话头的 LLM 会把「莉娜说的
+    # 经历」误当成「用户讲过的事」拿去当话头（用户实测到的 bug）。
     for idx, (u, a) in enumerate(visible, start=1):
-        lines.append(f"{idx}. U: {u[:120]}")
-        lines.append(f"   A: {a[:120]}")
+        lines.append(f"{idx}. 用户说：{u[:120]}")
+        lines.append(f"   莉娜（自己）说：{a[:120]}")
     return "\n".join(lines)
 
 
@@ -633,6 +635,31 @@ def build_lina_advisors(
                 "- 用「我还有点事 / 我得走了 / 先不聊了」表示要离开 → true，哪怕语气客气。\n"
                 "- 哪怕前面还说了别的，只要这轮带着收尾/要走/改天再说的意思 → true。\n"
                 "- 用户还在正常聊、在提问、在倾诉、在约**具体**的下次（'明晚8点聊'）→ false。"
+            ),
+            default=False,
+            timeout=timeout,
+        ),
+        "need_diary": BoolAdvisor(
+            client,
+            model=model,
+            name="need_diary",
+            field_name="need_diary",
+            target_desc=(
+                "这轮是否该调出莉娜的**谈资卡 / 生活日记**来聊。莉娜有一套话题谈资卡"
+                "（天气、季节、最近忙不忙、独处、兴趣、情绪、和身边人的事…几乎覆盖所有"
+                "日常闲聊与轻共情话题）和对应的真实日记。**只要这轮是在聊天、闲聊、共情、"
+                "或把话头引向莉娜，就该调**——它会帮莉娜有具体内容可聊、不空泛不回避。"
+            ),
+            decision_rules=(
+                "- 用户**主动问莉娜自己**（你呢/你平时做什么/你喜欢什么/你那边怎样）→ true。\n"
+                "- **日常闲聊话题**（天气、季节、最近怎样、心情、吃喝、兴趣、作息、独处…）→ true。"
+                "这些都有对应谈资卡，要调出来聊得具体。\n"
+                "- 用户在**讲自己的生活/经历/情绪** → true（日记作共情背景，先关注用户）。\n"
+                "- 适合莉娜主动分享近况、勾话头时 → true。\n"
+                "- **只有纯功能性请求 → false**：问现实时间('几点了')、要莉娜帮忙做一件具体的"
+                "事、查与聊天无关的事实。\n"
+                "- 单字回应（嗯/哦/好的）→ false。拿不准时**偏 true**（调了也只是多一些可聊的素材）。\n"
+                "- 拿不准时偏向 false（省检索；真该聊自己时再调，宁可漏不可滥）。"
             ),
             default=False,
             timeout=timeout,
