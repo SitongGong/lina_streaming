@@ -1352,6 +1352,7 @@ def create_app() -> Flask:
                 "controller_trace": result.controller_trace,
                 "diary_debug": result.diary_debug,
                 "final_prompt": result.final_prompt,
+                "timings": result.timings,
                 "pending_segments": result.pending_segments,
                 "has_more_segments": bool(result.pending_segments),
                 "usage": {
@@ -1401,6 +1402,7 @@ def create_app() -> Flask:
                 "controller_trace": result.controller_trace,
                 "diary_debug": result.diary_debug,
                 "final_prompt": result.final_prompt,
+                "timings": result.timings,
                 "pending_segments": result.pending_segments,
                 "has_more_segments": bool(result.pending_segments),
                 "usage": {
@@ -1646,6 +1648,7 @@ def create_app() -> Flask:
                                 "plan": ev.get("plan"),
                                 "diary_debug": ev.get("diary_debug"),
                                 "final_prompt": ev.get("final_prompt"),
+                                "timings": ev.get("timings"),
                             }
                         )
             except Exception as e:  # noqa: BLE001 — surface mid-stream errors

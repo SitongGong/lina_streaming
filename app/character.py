@@ -150,6 +150,8 @@ class ChatResult:
     diary_debug: dict | None = None
     # 最终拼给主模型的完整 prompt（system + messages 原样拼成可读文本，供右侧面板滚动查看）。
     final_prompt: str | None = None
+    # 各阶段耗时（毫秒）：controller_ms / retrieval_ms / inference_ms。
+    timings: dict | None = None
     # Remaining segment outline points this reply parked for later
     # continuation (empty = not split). Web layer arms the continue timer
     # on a non-empty list.
@@ -588,6 +590,11 @@ class CharacterEngine:
         diary_continuation = False
         diary_debug: dict = {"enabled": bool(self.diary_memory.enabled)}
 
+        # 各阶段耗时（毫秒），供右侧面板展示。controller=判定+判别器并发段，
+        # retrieval=日记/话题/人设检索段，inference 由 chat()/chat_stream() 另填。
+        timings: dict = {}
+        _t_ctrl0 = time.perf_counter()
+
         # 1) Controller 判定（plan）+ 话题连续性判断器（m）。
         # 二者互不依赖：当 controller 在 + 日记启用时，**一次并发**同时发两个 LLM 调用
         # （dispatch_and_match_sync），省串行往返延迟；否则退回单独 dispatch。
@@ -610,6 +617,9 @@ class CharacterEngine:
         else:
             plan, plan_trace = self._dispatch_controller(
                 user_message, conversation, has_cross_session_memory=bool(extra_memory_chunks))
+        # controller + 判别器并发段结束。
+        timings["controller_ms"] = round((time.perf_counter() - _t_ctrl0) * 1000, 1)
+        _t_retr0 = time.perf_counter()
 
         # 日记/谈资两级检索：用并发拿到的 m（话题连续性判断器结果）走分支。
         if run_diary and m is not None:
@@ -751,6 +761,8 @@ class CharacterEngine:
         # Cross-session user memory passed in by the caller (web layer).
         if extra_memory_chunks and plan.use_cross_session_memory:
             retrieved_history = list(extra_memory_chunks) + retrieved_history
+        # 检索段结束（日记/话题/人设/历史）。
+        timings["retrieval_ms"] = round((time.perf_counter() - _t_retr0) * 1000, 1)
 
         # 3) Mood / first-turn / forced-state seeding (unchanged).
         prior_mood = conversation.last_assistant_meta()
@@ -818,6 +830,7 @@ class CharacterEngine:
             # 调试用：把最终发给主模型的 system + messages 原样拼成可读文本，供右侧面板展示。
             # 只读拼接，不改任何发送内容。
             "final_prompt": _render_final_prompt(system_blocks, api_messages),
+            "timings": timings,
         }
 
     def _slid_out_turns(
@@ -865,14 +878,17 @@ class CharacterEngine:
         plan_trace = prep["plan_trace"]
         diary_debug = prep.get("diary_debug")
         final_prompt = prep.get("final_prompt")
+        timings = dict(prep.get("timings") or {})
         history_window = plan.history_window if self._controller is not None else self.history_window
 
+        _t_inf0 = time.perf_counter()
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=prep["system_blocks"],
             messages=prep["api_messages"],
         )
+        timings["inference_ms"] = round((time.perf_counter() - _t_inf0) * 1000, 1)
 
         text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
         raw_reply = "".join(text_parts).strip()
@@ -913,6 +929,7 @@ class CharacterEngine:
             controller_trace=plan_trace,
             diary_debug=diary_debug,
             final_prompt=final_prompt,
+            timings=timings,
             pending_segments=list(segments),
             slid_out_turns=slid_out,
         )
@@ -938,6 +955,8 @@ class CharacterEngine:
         retrieved = prep["retrieved"]
         retrieved_history = prep["retrieved_history"]
         forced = prep["forced"]
+        timings = dict(prep.get("timings") or {})
+        _t_inf0 = time.perf_counter()
 
         header_done = False  # have we parsed/stripped the [mood:] header line?
         _ = prep  # system_blocks/plan used below
@@ -1028,6 +1047,7 @@ class CharacterEngine:
             conversation.forced_state = None
 
         usage = getattr(final, "usage", None)
+        timings["inference_ms"] = round((time.perf_counter() - _t_inf0) * 1000, 1)
         yield {
             "type": "done",
             "text": cleaned_full,
@@ -1035,10 +1055,11 @@ class CharacterEngine:
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
             "pending_segments": list(segments),
-            # 调试面板字段（与非流式 /api/chat 对齐）：controller 判定、日记检索、最终 prompt。
+            # 调试面板字段（与非流式 /api/chat 对齐）：controller 判定、日记检索、最终 prompt、耗时。
             "plan": prep["plan"].to_dict() if prep.get("plan") else None,
             "diary_debug": prep.get("diary_debug"),
             "final_prompt": prep.get("final_prompt"),
+            "timings": timings,
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", 0) or 0,
                 "output_tokens": getattr(usage, "output_tokens", 0) or 0,

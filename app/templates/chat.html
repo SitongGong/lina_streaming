@@ -1625,6 +1625,10 @@
     <div class="rail-sub">是否调日记、问题类型、命中的话题与日记编号、新/旧话题。</div>
     <div id="diary-debug" class="debug-box"></div>
 
+    <h3 style="margin-top:14px;">本轮耗时</h3>
+    <div class="rail-sub">controller+判别器并发 / 检索 / 主模型推理 各阶段毫秒数。</div>
+    <div id="timings" class="debug-box"></div>
+
     <h3 style="margin-top:14px;">检索资料</h3>
     <div class="rail-sub">RAG 为本轮检索到的设定片段与历史记忆。</div>
     <div id="chunks" class="debug-box"></div>
@@ -2464,6 +2468,28 @@ function renderUsage(u) {
   `;
 }
 
+function renderTimings(t) {
+  const el = $('timings');
+  if (!el) return;
+  if (!t || typeof t !== 'object' || !Object.keys(t).length) {
+    el.innerHTML = '<div style="color:var(--ink-faint);font-style:italic;">（本轮无）</div>';
+    return;
+  }
+  const fmt = (v) => (v == null ? '—' : (v >= 1000 ? (v/1000).toFixed(2) + ' s' : v + ' ms'));
+  const ctrl = t.controller_ms, retr = t.retrieval_ms, inf = t.inference_ms;
+  const known = [ctrl, retr, inf].filter(v => typeof v === 'number');
+  const total = known.length ? known.reduce((a,b)=>a+b, 0) : null;
+  el.innerHTML = '';
+  _dbgRow(el, 'controller+判别器', fmt(ctrl));
+  _dbgRow(el, '检索', fmt(retr));
+  _dbgRow(el, '主模型推理', fmt(inf));
+  const row = document.createElement('div');
+  row.className = 'dbg-row';
+  row.style.fontWeight = '600';
+  row.innerHTML = '<span class="dbg-k">合计</span><span class="dbg-v">' + fmt(total) + '</span>';
+  el.appendChild(row);
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -2510,6 +2536,7 @@ async function send() {
     state.lastMeta = data.mood || state.lastMeta;
     renderChunks(data.retrieved, data.retrieved_history);
     renderDebug(data.plan, data.diary_debug, data.final_prompt);
+    renderTimings(data.timings);
     renderUsage(data.usage);
     speakText(data.reply, data.mood, { interrupt: true });  // 文字输入也朗读
     // 这一轮回复可能被拆成几小段，第一段已展示，其余要点 park 在这里，
@@ -4024,6 +4051,7 @@ async function streamVoiceReply(text) {
           renderForcedPill(ev.forced_state || null);
           renderChunks(ev.retrieved, ev.retrieved_history);
           renderDebug(ev.plan, ev.diary_debug, ev.final_prompt);
+          renderTimings(ev.timings);
           renderUsage(ev.usage);
           await loadSessions();
           maybeAutoSurvey();   // 每 50 轮自动弹问卷
