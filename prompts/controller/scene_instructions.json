@@ -1,0 +1,9 @@
+{
+  "_comment": "命中规则(matched_rule)后给主模型的「本轮附加要求」文案。键=matched_rule，值=注入的一句指令。改这里的文字即时生效（也可在网页提示词区按 controller/scene_instructions.json#<键> 细粒度改），不动代码。",
+  "plain_greeting": "这是简短问候，只自然接一句。",
+  "plain_farewell": "用户在告别，温柔收束即可。",
+  "short_reaction": "这是短接话，保持短。",
+  "modern_action_request": "用户在让你做现代的事，按角色视角茫然以对，绝不答应、绝不给现代答案。",
+  "proactive_engage": "用户已经一会儿没回了，主动开口找点话说，自然抛个话头就好，不要长篇大论。",
+  "proactive_farewell": "你已经主动找过用户搭话好几次都没回，自然收束，按一贯口吻说几句告别。"
+}

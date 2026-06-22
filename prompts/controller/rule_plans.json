@@ -1,0 +1,17 @@
+{
+  "_comment": "规则层命中某场景后，该场景的【调参值】：sentences(句数)、max_reply_chars(单段字数上限)、tone_hint(语气)、retrieve_k(人设检索条数)。键=matched_rule。改这里即时生效（也可在网页提示词区按 controller/rule_plans.json#<规则>.<字段> 改），不动代码。结构性开关(allow_segment/use_* 等)仍在代码里，不在此外置。tone_hint 留空串表示不指定语气。",
+
+  "proactive_farewell":   {"sentences": 2, "max_reply_chars": 60, "tone_hint": "温柔", "retrieve_k": 0},
+  "proactive_engage":     {"sentences": 2, "max_reply_chars": 60, "tone_hint": "自然", "retrieve_k": 2},
+  "continuation":         {"sentences": 2, "max_reply_chars": 50, "tone_hint": "自然", "retrieve_k": 0},
+  "welcome_back":         {"sentences": 2, "max_reply_chars": 60, "tone_hint": "熟悉", "retrieve_k": 2},
+  "empty_input":          {"sentences": 1, "max_reply_chars": 30, "tone_hint": "",     "retrieve_k": 0},
+  "modern_action_request":{"sentences": 2, "max_reply_chars": 55, "tone_hint": "疑惑", "retrieve_k": 0},
+  "user_vent":            {"sentences": 3, "max_reply_chars": 70, "tone_hint": "温柔", "retrieve_k": 2},
+  "relationship_recall":  {"sentences": 3, "max_reply_chars": 70, "tone_hint": "",     "retrieve_k": 3},
+  "world_immersion":      {"sentences": 3, "max_reply_chars": 80, "tone_hint": "雀跃", "retrieve_k": 5},
+  "self_introspection":   {"sentences": 3, "max_reply_chars": 80, "tone_hint": "认真", "retrieve_k": 5},
+  "plain_greeting":       {"sentences": 1, "max_reply_chars": 30, "tone_hint": "自然", "retrieve_k": 0},
+  "plain_farewell":       {"sentences": 1, "max_reply_chars": 30, "tone_hint": "温柔", "retrieve_k": 0},
+  "short_reaction":       {"sentences": 1, "max_reply_chars": 24, "tone_hint": "轻松", "retrieve_k": 0}
+}

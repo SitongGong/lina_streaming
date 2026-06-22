@@ -363,6 +363,9 @@ def _generate_json_components() -> list[tuple[str, str, str, str]]:
         ("controller/rules.json", "规则层关键词", "rule", None),          # 每个场景一条（值是数组）
         ("controller/proactive_stages.json", "主动发言策略", "stage", None),  # 每个 stage 一条
         ("controller/constraints.json", "本轮约束句", "constraint", None),    # 每条约束一条
+        ("controller/scene_instructions.json", "命中场景附加要求", "scene", None),  # 每个 matched_rule 一条
+        ("controller/rule_plans.json", "规则层调参", "ruleplan", ["sentences", "max_reply_chars", "tone_hint", "retrieve_k"]),
+        ("main/user_content_instructions.json", "主模型注入文案", "uc", None),  # 各上下文块固定文案/铁律
     ]
     comps: list[tuple[str, str, str, str]] = []
     base = PROJECT_ROOT / "prompts"

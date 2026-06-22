@@ -100,6 +100,27 @@ def _load_main_prompt(filename: str, fallback: str = "") -> str:
         return fallback
 
 
+# 注入主模型 user 轮的各上下文块固定文案，外置到 prompts/main/user_content_instructions.json，
+# 支持网页提示词区按 main/user_content_instructions.json#<键> 编辑、override 即时生效。
+_UC_REL = "main/user_content_instructions.json"
+
+
+def _uc(key: str, fallback: str = "", **fmt) -> str:
+    """读 user_content_instructions.json 的某条文案（经 controller 的 override 层），
+    再用 **fmt 填占位（{mood} 等）。文件/字段缺失则用 fallback，保证不崩。"""
+    try:
+        from .controller._prompts import load_json_value
+        text = load_json_value(_UC_REL, key, fallback=fallback)
+    except Exception:
+        text = fallback
+    if fmt:
+        try:
+            return text.format(**fmt)
+        except (KeyError, IndexError, ValueError):
+            return text
+    return text
+
+
 BEHAVIOR_RULES = _load_main_prompt("behavior_rules.txt")
 MOOD_FORMAT_SPEC = _load_main_prompt("mood_format_spec.txt")
 SEGMENT_PROTOCOL_SPEC = _load_main_prompt("segment_protocol_spec.txt")
@@ -433,120 +454,119 @@ class CharacterEngine:
 
         if prior_mood:
             if is_forced:
-                sections.append(
-                    "<状态强制设定 — 用户刚刚手动设定了莉娜此刻的情绪和信任度。"
+                sections.append(_uc(
+                    "mood_forced",
+                    fallback="<状态强制设定 — 用户刚刚手动设定了莉娜此刻的情绪和信任度。"
                     "请直接从这个状态出发回复，不要质疑、纠正或试图「回到上一轮的状态」。"
-                    "这一轮她就是这个状态。>\n"
-                    f"情绪：{prior_mood.get('mood', '平静')} / 强度 {prior_mood.get('intensity', 5)}\n"
-                    f"对该用户的信任度：{prior_mood.get('trust', 3)} / 10\n"
-                    "</状态强制设定>"
-                )
+                    "这一轮她就是这个状态。>\n情绪：{mood} / 强度 {intensity}\n"
+                    "对该用户的信任度：{trust} / 10\n</状态强制设定>",
+                    mood=prior_mood.get('mood', '平静'), intensity=prior_mood.get('intensity', 5),
+                    trust=prior_mood.get('trust', 3),
+                ))
             elif is_first_turn:
-                sections.append(
-                    "<起始状态 — 这是莉娜与该用户的第一次接触，请用以下默认值作为起点>\n"
-                    f"情绪：{prior_mood.get('mood', '平静')} / 强度 {prior_mood.get('intensity', 5)}\n"
-                    f"对该用户的信任度：{prior_mood.get('trust', 3)} / 10\n"
+                sections.append(_uc(
+                    "mood_first_turn",
+                    fallback="<起始状态 — 这是莉娜与该用户的第一次接触，请用以下默认值作为起点>\n"
+                    "情绪：{mood} / 强度 {intensity}\n对该用户的信任度：{trust} / 10\n"
                     "**强制规则**：信任度 3 是陌生人的标准起始值。"
                     "**不要**因为用户开场白礼貌或友好就在第一轮就抬高到 5/7/8。"
-                    "信任度的调整严格遵循「情绪连续性」规则："
-                    "用户共情/真懂古代文化才 +1/+2；用户矛盾/冒犯才 -1/-2。"
-                    "如果用户只是简单打招呼或客套，这一轮的 信任= 应仍然是 3（最多 4）。\n"
-                    "</起始状态>"
-                )
+                    "信任度的调整严格遵循「情绪连续性」规则：用户共情/真懂古代文化才 +1/+2；"
+                    "用户矛盾/冒犯才 -1/-2。如果用户只是简单打招呼或客套，这一轮的信任度"
+                    "应仍然是 3（最多 4）。\n</起始状态>",
+                    mood=prior_mood.get('mood', '平静'), intensity=prior_mood.get('intensity', 5),
+                    trust=prior_mood.get('trust', 3),
+                ))
             else:
-                sections.append(
-                    "<近况 — 莉娜目前的状态，影响这一轮的回复>\n"
-                    f"上一轮情绪：{prior_mood.get('mood', '?')} / 强度 {prior_mood.get('intensity', '?')}\n"
-                    f"当前对该用户的信任度：{prior_mood.get('trust', '?')} / 10\n"
+                sections.append(_uc(
+                    "mood_ongoing",
+                    fallback="<近况 — 莉娜目前的状态，影响这一轮的回复>\n"
+                    "上一轮情绪：{mood} / 强度 {intensity}\n当前对该用户的信任度：{trust} / 10\n"
                     "请从这个状态出发，让本轮回复带着上一轮的情绪余韵；"
-                    "信任度只能小幅 (±1/±2) 调整，不要突变。\n"
-                    "</近况>"
-                )
+                    "信任度只能小幅 (±1/±2) 调整，不要突变。\n</近况>",
+                    mood=prior_mood.get('mood', '?'), intensity=prior_mood.get('intensity', '?'),
+                    trust=prior_mood.get('trust', '?'),
+                ))
 
         # 莉娜的「自我事实清单」命中项——由 controller 决定本轮是否检索（第 4 个
         # 检索库），按当前话题 BM25 检出相关几条（不再整份常驻）。她亲口说过、
         # 人设文件里没写的稳定事实（养猫、承诺、喜好…），保证自我一致。
         if self_facts_text:
-            sections.append(
-                "<莉娜的自我设定记忆 — 你（莉娜）之前亲口说过的、与本轮相关的关于你自己的事实。"
-                "务必与这些保持一致，不要自相矛盾；自然引用即可，不要生硬复述。>\n"
-                f"{self_facts_text}\n</莉娜的自我设定记忆>"
+            _h = _uc(
+                "self_facts_header",
+                fallback="<莉娜的自我设定记忆 — 你（莉娜）之前亲口说过的、与本轮相关的关于你自己的事实。"
+                "务必与这些保持一致，不要自相矛盾；自然引用即可，不要生硬复述。>",
             )
+            sections.append(f"{_h}\n{self_facts_text}\n</莉娜的自我设定记忆>")
 
         # 莉娜日记/谈资命中项——由 controller 判定本轮该找谈资时，从预设日记库（两级
         # 检索：话题→日记）调出的莉娜真实经历。用途：用户提到相关话题时有真事可聊、
         # 主动找话有真素材，**不凭空编造**。只作背景素材，自然化用，别照搬复述。
         if diary_text:
-            _cont = (
-                "（⚠️ 本轮用户是在**接着上一个话题继续追问**，比如用代词/省略问「他还好吗」"
+            _cont = _uc(
+                "diary_continuation_note",
+                fallback="（⚠️ 本轮用户是在**接着上一个话题继续追问**，比如用代词/省略问「他还好吗」"
                 "「那现在呢」。下面就是上次聊这个话题时用的同一份日记——**接着上次说过的口径往下答，"
-                "保持前后一致，不要改口、不要重新编一套**。）\n"
-                if diary_continuation else ""
+                "保持前后一致，不要改口、不要重新编一套**。）\n",
+            ) if diary_continuation else ""
+            _h = _uc(
+                "diary_header",
+                fallback="<莉娜的谈资与日记 — 这是为本轮话题匹配到的【话题卡】+ 卡里精确关联的【真实日记】。\n"
+                "{continuation}话题卡是你这个角色的「谈资说明书」；日记是你真实经历过的事。\n"
+                "**铁律（必须遵守）：**\n1. **给了内容就一定要用它来聊，不许回避**。\n"
+                "2. **绝不编造与日记冲突的事实**。\n3. 照着话题卡的「暴露边界」「共情方式」来。\n"
+                "4. 用户倾诉/难过时先共情他、再自然带出你的类似经历。\n"
+                "5. 自然化用，用你自己的语气说，不要整段照搬。>",
+                continuation=_cont,
             )
-            sections.append(
-                "<莉娜的谈资与日记 — 这是为本轮话题匹配到的【话题卡】+ 卡里精确关联的【真实日记】。\n"
-                f"{_cont}"
-                "话题卡是你这个角色的「谈资说明书」：里面的开场句、可追问、莉娜观点、共情方式、"
-                "暴露边界，都是为你写好的、你该如何聊这个话题的指引；日记是你真实经历过的事。\n"
-                "**铁律（必须遵守）：**\n"
-                "1. **既然这里给了你内容，就一定要用它来聊，不许回避、不许说「没什么好说的」"
-                "「就这样」「你想听哪方面」来搪塞**。对方在问，你就照着话题卡的开场句/观点、"
-                "结合下面的真实日记，讲出具体的事。\n"
-                "   · 尤其问到**某个人（培根、安娜…）或某段经历**时，别只甩一句干巴巴的定性"
-                "（如只说「他是我老师」就完）——结合日记里的真实细节、你对他的真实感受，"
-                "讲出有温度、有画面的两三句，让人感到这是你生命里真实的人和事。\n"
-                "2. **绝不编造与日记冲突的事实**。允许你在日记基础上自然补充细节、用自己的口吻讲，"
-                "但**核心事实（时间、地点、人物、发生了什么）必须与日记一致，不能改、不能瞎编**。\n"
-                "3. 照着话题卡的「暴露边界」和「共情方式」来——它写了什么该聊、什么别追问。\n"
-                "4. 用户在倾诉/难过时：先关注他、共情他，再自然带出你的类似经历当陪伴，"
-                "不要喧宾夺主把话题抢到自己身上。\n"
-                "5. 自然化用，用你自己的语气说，不要整段照搬卡或日记的原文。>\n"
-                f"{diary_text}\n</莉娜的谈资与日记>"
-            )
+            sections.append(f"{_h}\n{diary_text}\n</莉娜的谈资与日记>")
 
         # 「用户事实清单」命中项——用户在过往（可能很多轮前、已滑出窗口）讲过的、
         # 关于他自己的稳定事实。这是解决「聊久了把用户的事忘了/记混/编造」的关键：
         # 按当前话题 BM25 检出相关几条注入，让莉娜记得用户是谁、聊过什么。
         if user_facts_text:
-            sections.append(
-                "<关于用户的记忆 — 用户之前讲过的、关于他自己的事实（可能是很久以前说的）。"
+            _h = _uc(
+                "user_memory_header",
+                fallback="<关于用户的记忆 — 用户之前讲过的、关于他自己的事实（可能是很久以前说的）。"
                 "请把这些当作你确实记得的事，自然地体现出「记得他」；但**只用这里列出的**，"
-                "不要凭印象编造用户没说过的事，也不要生硬复述。>\n"
-                f"{user_facts_text}\n</关于用户的记忆>"
+                "不要凭印象编造用户没说过的事，也不要生硬复述。>",
             )
+            sections.append(f"{_h}\n{user_facts_text}\n</关于用户的记忆>")
         else:
             # 没有关于这个用户的任何记忆（如全新会话）。**诚实**：不要装熟、不要编
             # 「你来过几次」「眼熟」这种。用户若问「还记得我吗」，就如实说一时想不起来/
             # 我们好像还没怎么聊过——不假装记得一个其实没有记录的人。
-            sections.append(
-                "<关于用户的记忆 — （空：你这边没有关于这个用户的任何记忆。）\n"
+            sections.append(_uc(
+                "user_memory_empty",
+                fallback="<关于用户的记忆 — （空：你这边没有关于这个用户的任何记忆。）\n"
                 "**这意味着你其实不认识他、或还没怎么聊过。诚实对待：不要装熟、不要编造"
                 "「你来过几次」「有点眼熟」「记得你」这类。若他问你是否记得他，就如实说"
-                "一时想不起来 / 我们好像还没正式聊过。>"
-            )
+                "一时想不起来 / 我们好像还没正式聊过。>",
+            ))
 
         if retrieved:
             static_text = "\n\n".join(c.render() for c in retrieved)
-            sections.append(
-                "<角色设定参考 — 与本轮对话相关的设定细节，仅作背景，不要照搬其措辞或括号动作>\n"
-                f"{static_text}\n</角色设定参考>"
+            _h = _uc(
+                "char_ref_header",
+                fallback="<角色设定参考 — 与本轮对话相关的设定细节，仅作背景，不要照搬其措辞或括号动作>",
             )
+            sections.append(f"{_h}\n{static_text}\n</角色设定参考>")
         if retrieved_history:
             hist_text = "\n\n".join(c.render() for c in retrieved_history)
-            sections.append(
-                "<历史回忆 — 来自本会话更早轮次的相关片段。这些都是已经发生过的对话，"
-                "用户之前讲过的事实/偏好/承诺，请记住并保持一致；不要重复或复述。>\n"
-                f"{hist_text}\n</历史回忆>"
+            _h = _uc(
+                "history_recall_header",
+                fallback="<历史回忆 — 来自本会话更早轮次的相关片段。这些都是已经发生过的对话，"
+                "用户之前讲过的事实/偏好/承诺，请记住并保持一致；不要重复或复述。>",
             )
+            sections.append(f"{_h}\n{hist_text}\n</历史回忆>")
         # 用户像微信那样"引用"了莉娜之前的某条消息来回复——明确告诉模型
         # 这一轮是针对哪句话说的，回复要承接那句，而不是泛泛而谈。
         quoted = str(quoted_text or "").strip()
         if quoted:
-            sections.append(
-                "<用户引用了你之前说过的这句话来回复 — 本轮请明确承接、回应这句，"
-                "不要答非所问>\n"
-                f"{quoted}\n</用户引用>"
+            _h = _uc(
+                "quoted_header",
+                fallback="<用户引用了你之前说过的这句话来回复 — 本轮请明确承接、回应这句，不要答非所问>",
             )
+            sections.append(f"{_h}\n{quoted}\n</用户引用>")
         # 打断接续判断：上一条莉娜还有没说完的段（park 在 pending_segments），
         # 用户这时插了新话。不直接作废，而是把没说完的要点作为背景交给主模型，
         # 由它自己判断——新消息跟这些要点相关就先回应、再自然接着说完；岔开了
@@ -554,16 +574,15 @@ class CharacterEngine:
         pending = [str(p).strip() for p in (pending_segments or []) if str(p or "").strip()]
         if pending:
             points = "、".join(pending)
-            sections.append(
-                "<你上一条还没说完的话 — 你之前分段说话时，还剩下面这些要点没说，"
+            _h = _uc(
+                "pending_segments_header",
+                fallback="<你上一条还没说完的话 — 你之前分段说话时，还剩下面这些要点没说，"
                 "用户这会儿插了新消息进来。请你自己判断：\n"
-                "- 如果用户的新消息跟这些要点还相关（顺着同一个话题、或在追问），"
-                "就先回应用户的新消息，然后自然地把相关的那点接着说完；\n"
-                "- 如果用户明显岔开、换了话题，就放下这些要点，专心回应用户的新消息，"
-                "不要硬把旧话题拽回来。\n"
-                "不管接不接，都不要提到「我刚才还想说」这类元叙述。>\n"
-                f"{points}\n</你上一条还没说完的话>"
+                "- 如果用户的新消息跟这些要点还相关，就先回应新消息，再自然把相关那点接着说完；\n"
+                "- 如果用户明显岔开、换了话题，就放下这些要点，专心回应新消息。\n"
+                "不管接不接，都不要提到「我刚才还想说」这类元叙述。>",
             )
+            sections.append(f"{_h}\n{points}\n</你上一条还没说完的话>")
         sections.append(f"<用户发言>\n{user_message}\n</用户发言>")
         if not sections[:-1]:  # only user message present, no context blocks
             return user_message

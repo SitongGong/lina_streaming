@@ -135,7 +135,36 @@ class LinaRuleRouter:
         plan = self._route(ctx)
         if plan is None:
             return None
+        plan = self._apply_rule_plan_params(plan)
         return self._apply_behavior_defaults(ctx, plan)
+
+    @staticmethod
+    def _apply_rule_plan_params(plan: LinaPromptPlan) -> LinaPromptPlan:
+        """用 prompts/controller/rule_plans.json 覆盖本规则的【调参值】
+        （sentences / max_reply_chars / tone_hint / retrieve_k），便于在网页/文件里改、
+        即时生效。文件/字段缺失则保留 _route 里写死的默认值（不崩）。结构性开关不动。
+        LinaPromptPlan 是 frozen dataclass，用 dataclasses.replace 产出新实例。"""
+        rule = plan.matched_rule
+        if not rule:
+            return plan
+        from dataclasses import replace
+        from ._prompts import load_json_value
+        rel = "controller/rule_plans.json"
+        changes: dict = {}
+        # int 字段：读到合法数字才覆盖；空/缺失则保留默认。
+        for fld in ("sentences", "max_reply_chars", "retrieve_k"):
+            raw = load_json_value(rel, f"{rule}.{fld}", fallback="")
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                changes[fld] = int(float(str(raw).strip()))
+            except (ValueError, TypeError):
+                pass
+        # tone_hint 是文本，空串也允许（表示不指定语气）；仅当字段存在时覆盖。
+        tone = load_json_value(rel, f"{rule}.tone_hint", fallback=None)
+        if tone is not None:
+            changes["tone_hint"] = str(tone)
+        return replace(plan, **changes) if changes else plan
 
     @staticmethod
     def _apply_behavior_defaults(ctx: LinaTurnContext, plan: LinaPromptPlan) -> LinaPromptPlan:

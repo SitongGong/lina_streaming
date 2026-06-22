@@ -174,25 +174,27 @@ class LinaPromptComposer:
             f"{joined}"
         )
 
+    # 命中规则→附加文案外置到 prompts/controller/scene_instructions.json，
+    # 改文字不动代码、可在网页提示词区编辑。文件/字段缺失则回退下面的内置默认。
+    _SCENE_INSTRUCTION_DEFAULTS = {
+        "plain_greeting": "这是简短问候，只自然接一句。",
+        "plain_farewell": "用户在告别，温柔收束即可。",
+        "short_reaction": "这是短接话，保持短。",
+        "modern_action_request": "用户在让你做现代的事，按角色视角茫然以对，绝不答应、绝不给现代答案。",
+        "proactive_engage": "用户已经一会儿没回了，主动开口找点话说，自然抛个话头就好，不要长篇大论。",
+        "proactive_farewell": "你已经主动找过用户搭话好几次都没回，自然收束，按一贯口吻说几句告别。",
+    }
+
     @staticmethod
     def _build_instruction_block(plan: LinaPromptPlan) -> str:
+        from ._prompts import load_json_value
         notes: list[str] = []
-        if plan.matched_rule == "plain_greeting":
-            notes.append("这是简短问候，只自然接一句。")
-        elif plan.matched_rule == "plain_farewell":
-            notes.append("用户在告别，温柔收束即可。")
-        elif plan.matched_rule == "short_reaction":
-            notes.append("这是短接话，保持短。")
-        elif plan.matched_rule == "modern_action_request":
-            notes.append("用户在让你做现代的事，按角色视角茫然以对，绝不答应、绝不给现代答案。")
-        elif plan.matched_rule == "proactive_engage":
-            notes.append(
-                "用户已经一会儿没回了，主动开口找点话说，自然抛个话头就好，不要长篇大论。"
-            )
-        elif plan.matched_rule == "proactive_farewell":
-            notes.append(
-                "你已经主动找过用户搭话好几次都没回，自然收束，按一贯口吻说几句告别。"
-            )
+        rule = plan.matched_rule
+        if rule in LinaPromptComposer._SCENE_INSTRUCTION_DEFAULTS:
+            fb = LinaPromptComposer._SCENE_INSTRUCTION_DEFAULTS[rule]
+            text = load_json_value("controller/scene_instructions.json", rule, fallback=fb)
+            if text and text.strip():
+                notes.append(text.strip())
         if not notes:
             return ""
         seen: set[str] = set()
