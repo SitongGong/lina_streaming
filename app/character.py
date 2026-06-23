@@ -11,6 +11,7 @@ Strategy:
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,50 @@ MOOD_TAG_RE = re.compile(
     r"(?P<trust>\d+)\s*\]\s*\n?",
     re.IGNORECASE,
 )
+
+
+ACTION_LABELS = {
+    "nod": "点头",
+    "shake_head": "摇头",
+    "stretch": "伸懒腰",
+    "think": "思考",
+    "left_cheek_on_hand": "左手托腮",
+    "both_cheeks_on_hands": "双手托腮",
+    "arms_crossed_tilt_think": "双手抱胸歪头思考",
+    "yawn": "打哈欠",
+    "left_scratch_head": "左手挠头",
+    "clear_throat": "清嗓子",
+    "aha_fist_palm": "恍然大悟右拳砸左手",
+    "snap_fingers": "打响指",
+}
+
+ACTION_HINTS = {
+    "nod": ("点头", "嗯嗯", "同意", "确认", "认可", "没错", "对对对"),
+    "shake_head": ("摇头", "不行", "不要", "拒绝", "不是", "不对", "否认"),
+    "stretch": ("伸懒腰", "伸展", "舒展", "放松"),
+    "think": ("思考", "想想", "让我想", "琢磨", "考虑", "犹豫"),
+    "left_cheek_on_hand": ("左手托腮", "托腮", "发呆"),
+    "both_cheeks_on_hands": ("双手托腮", "认真听", "期待"),
+    "arms_crossed_tilt_think": ("抱胸", "歪头思考", "质疑", "怀疑"),
+    "yawn": ("哈欠", "打哈欠", "困", "困了", "犯困", "疲惫"),
+    "left_scratch_head": ("挠头", "尴尬", "不知道", "不确定"),
+    "clear_throat": ("清嗓子", "认真说", "准备说", "切入正题"),
+    "aha_fist_palm": ("恍然大悟", "突然明白", "明白了", "原来如此", "想到了"),
+    "snap_fingers": ("打响指", "灵机一动", "有办法", "决定了"),
+}
+
+ACTION_CATALOG_TEXT = "\n".join(
+    f"- {action} = {label}（触发参考：{'、'.join(ACTION_HINTS[action])}）"
+    for action, label in ACTION_LABELS.items()
+)
+
+# Matches a hidden trailing gesture-plan tag like:
+#   [gestures: [{"action":"think","segment_index":0}]]
+GESTURES_TAG_RE = re.compile(
+    r"\n?\s*\[\s*gestures?\s*[:：]\s*(?P<body>\[.*\])\s*\]\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+DISPLAY_SEGMENT_BOUNDARIES = set("，,、；;。！？!?\n")
 
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -225,6 +270,103 @@ MOOD_FORMAT_SPEC = """\
 """
 
 
+GESTURE_FORMAT_SPEC = """\
+# 动作 tag 格式（测试机制要求，不可省略）
+
+你需要在每条回复最后额外输出一行隐藏动作计划，只给系统读取，用户看不到，也不会被朗读。
+
+动作只能从下面 12 个测试 tag 中选择。必须输出英文 action，不要输出中文动作名。
+__ACTION_CATALOG__
+
+重要说明：
+- 动作 tag 是给数字人动画系统用的控制标签，不是正文，不是舞台提示，也不是你要说出口的话。
+- 正文仍然只写莉娜说出来的话。不要写“我点头了”“我挠头”“我清嗓子”。
+- 如果用户说“你点点头”“你清清嗓子”“你挠挠头”等测试动作请求，不要在正文里反问“我没有做这个动作吗”。你只需要自然接话，并把对应动作放进隐藏 gestures。
+- 如果用户输入明显是在做动作 tag 测试，或给了“你突然明白了”“你先想一想”这类临时情境指令，可以把它当作当前对话情境直接承接。不要因为“没有上下文”“刚认识”“我眼前没有这个东西”而总是反问。
+
+选择规则：
+- 每条回复最多选择 1 个当前最合适的主动作。
+- 动作选择以你本轮“可见回复”的语义，语气和情绪为准，不要只因为用户句子里出现某个动作词就触发。
+- 例外：如果用户明确是在测试或请求某个动作，而且你能用一句自然口语承接，就可以选择对应动作，但正文仍然不能写动作旁白。
+- 不确定，没有明显动作，普通闲聊，普通问答，或者只是因为缺少上下文而追问，就输出空数组。
+- 不要把 arms_crossed_tilt_think 或 left_cheek_on_hand 当成万能默认动作。只有明显质疑，判断可疑，认真评估时才用 arms_crossed_tilt_think；只有明显发呆，托腮，安静听或轻松闲聊时才用 left_cheek_on_hand。
+- 如果回复里有多个短片段，只把动作绑定到最匹配的片段。
+- segment_index 从 0 开始，按可见文本中的短片段编号。逗号，顿号，分号，句号，问号，感叹号，换行都可以形成片段边界。
+
+动作含义：
+- nod：确认，同意，认可，明白了，简短答应。
+- shake_head：否定，拒绝，不赞成，明确说不行。
+- stretch：累了一阵后放松，休息，伸展身体。
+- think：正在想，犹豫，推理，回答前需要思考。
+- left_cheek_on_hand：发呆，托腮想事，轻松闲聊里的走神。
+- both_cheeks_on_hands：双手托腮听故事，期待，好奇地等对方继续。
+- arms_crossed_tilt_think：抱胸歪头质疑，判断可疑信息，审视对方说法。
+- yawn：困了，熬夜，没精神，打哈欠。
+- left_scratch_head：挠头，不确定，尴尬，不知道怎么答。
+- clear_throat：清嗓子，准备认真讲重点，进入正式说明。
+- aha_fist_palm：恍然大悟，突然明白，线索对上了。
+- snap_fingers：灵机一动，突然想到办法，下定主意。
+
+输出格式：
+- 在整条回复的最后，另起一行输出：
+  [gestures: JSON数组]
+- JSON 数组中的每个对象只需要：
+  {"action":"动作ID","segment_index":0}
+- 如果没有合适动作，必须输出：
+  [gestures: []]
+
+示例：
+[mood: 犹豫 | 5 | 信任=3]
+嗯……
+我想想。
+[gestures: [{"action":"think","segment_index":1}]]
+
+[mood: 疲惫 | 4 | 信任=4]
+有点困了。
+[gestures: [{"action":"yawn","segment_index":0}]]
+
+[mood: 平静 | 4 | 信任=3]
+嗯，知道了。
+[gestures: [{"action":"nod","segment_index":0}]]
+
+[mood: 怀疑 | 5 | 信任=3]
+这说法不太对吧？
+[gestures: [{"action":"arms_crossed_tilt_think","segment_index":0}]]
+
+[mood: 困惑 | 4 | 信任=3]
+你说的是哪件事？
+[gestures: []]
+
+[mood: 犹豫 | 5 | 信任=3]
+嗯……
+我想想。
+[gestures: [{"action":"think","segment_index":1}]]
+
+[mood: 困惑 | 4 | 信任=3]
+这个我也不太确定。
+[gestures: [{"action":"left_scratch_head","segment_index":0}]]
+
+[mood: 认真 | 5 | 信任=3]
+嗯。
+重点是，先别乱碰它。
+[gestures: [{"action":"clear_throat","segment_index":0}]]
+
+[mood: 恍然 | 6 | 信任=3]
+啊，原来是这样。
+[gestures: [{"action":"aha_fist_palm","segment_index":0}]]
+
+[mood: 犹豫 | 5 | 信任=3]
+嗯……
+先别碰它，让我想想。
+[gestures: [{"action":"think","segment_index":1}]]
+
+约束：
+- 动作计划只能放在最后一行，不能夹在正文中。
+- 正文里仍然绝对不要写动作，表情，旁白或舞台提示。
+- 动作计划必须是合法 JSON，不要注释，不要多余文字。
+""".replace("__ACTION_CATALOG__", ACTION_CATALOG_TEXT)
+
+
 SYSTEM_PROMPT_TEMPLATE = """\
 你将扮演一个角色：「西比莉娜」（Albertus Sibyllina，昵称"莉娜"）。
 以下是关于这个角色和她所在世界的完整设定。你必须严格依据这些设定进行扮演。
@@ -261,6 +403,8 @@ class ChatResult:
     retrieved: list[Chunk]
     retrieved_history: list[Chunk]
     mood: dict | None = None  # {"mood": str, "intensity": int, "trust": int}
+    gesture_plan: list[dict] = field(default_factory=list)
+    tagged_reply: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
@@ -291,6 +435,113 @@ def parse_mood_tag(raw: str) -> tuple[str, dict | None]:
         "trust": trust,
     }
     return cleaned, mood
+
+
+def _display_segment_spans(text: str) -> list[tuple[int, int, str]]:
+    """Return visible display segment spans as (start, end, stripped_text)."""
+    spans: list[tuple[int, int, str]] = []
+    start: int | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if start is None and not ch.isspace():
+            start = i
+        if ch in DISPLAY_SEGMENT_BOUNDARIES and start is not None:
+            if ch == "…" and i + 1 < len(text) and text[i + 1] == "…":
+                i += 1
+                continue
+            end = i + 1
+            segment = text[start:end].strip()
+            if segment:
+                spans.append((start, end, segment))
+            start = None
+        i += 1
+    if start is not None:
+        segment = text[start:].strip()
+        if segment:
+            spans.append((start, len(text), segment))
+    return spans
+
+
+def split_display_segments(text: str) -> list[str]:
+    """Split visible text into short display segments while preserving punctuation."""
+    return [segment for _, _, segment in _display_segment_spans(text)]
+
+
+def parse_gestures_tag(raw: str) -> tuple[str, list[dict]]:
+    """Strip trailing hidden [gestures: ...] metadata from a model reply."""
+    if not raw:
+        return raw, []
+    match = GESTURES_TAG_RE.search(raw)
+    if not match:
+        return raw.rstrip(), []
+    cleaned = raw[: match.start()].rstrip()
+    try:
+        data = json.loads(match.group("body"))
+    except Exception:
+        return cleaned, []
+    if not isinstance(data, list):
+        return cleaned, []
+
+    gestures: list[dict] = []
+    for item in data[:1]:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        if action not in ACTION_LABELS:
+            continue
+        try:
+            segment_index = int(item.get("segment_index", 0))
+        except (TypeError, ValueError):
+            segment_index = 0
+        gestures.append(
+            {
+                "action": action,
+                "label": ACTION_LABELS[action],
+                "segment_index": max(0, segment_index),
+            }
+        )
+    return cleaned, gestures
+
+
+def attach_gesture_segments(
+    visible_reply: str,
+    gesture_plan: list[dict],
+) -> tuple[list[dict], str]:
+    """Attach segment text to gestures and render display text with 【tag】 prefixes."""
+    spans = _display_segment_spans(visible_reply)
+    if not spans:
+        return [], visible_reply
+
+    normalized: list[dict] = []
+    by_segment: dict[int, list[dict]] = {}
+    for item in gesture_plan[:1]:
+        action = str(item.get("action") or "")
+        if action not in ACTION_LABELS:
+            continue
+        try:
+            raw_index = int(item.get("segment_index", 0))
+        except (TypeError, ValueError):
+            raw_index = 0
+        segment_index = max(0, min(raw_index, len(spans) - 1))
+        normalized_item = {
+            "action": action,
+            "label": ACTION_LABELS[action],
+            "segment_index": segment_index,
+            "segment_text": spans[segment_index][2],
+        }
+        normalized.append(normalized_item)
+        by_segment.setdefault(segment_index, []).append(normalized_item)
+
+    tagged_parts: list[str] = []
+    last = 0
+    for index, (start, end, _segment) in enumerate(spans):
+        tagged_parts.append(visible_reply[last:start])
+        prefix = "".join(f"【{item['action']}】" for item in by_segment.get(index, []))
+        tagged_parts.append(prefix + visible_reply[start:end])
+        last = end
+    tagged_parts.append(visible_reply[last:])
+    return normalized, "".join(tagged_parts)
 
 
 class CharacterEngine:
@@ -332,6 +583,7 @@ class CharacterEngine:
     def _build_system_blocks(self) -> list[dict]:
         behavior = self.overrides.get("BEHAVIOR_RULES", BEHAVIOR_RULES)
         mood = self.overrides.get("MOOD_FORMAT_SPEC", MOOD_FORMAT_SPEC)
+        gesture = self.overrides.get("GESTURE_FORMAT_SPEC", GESTURE_FORMAT_SPEC)
         template = self.overrides.get("SYSTEM_PROMPT_TEMPLATE", SYSTEM_PROMPT_TEMPLATE)
         try:
             prompt = template.format(
@@ -345,6 +597,7 @@ class CharacterEngine:
             prompt = (
                 f"{template}\n\n{self.rag.core_text}\n\n{behavior}\n\n{mood}"
             )
+        prompt = f"{prompt}\n\n================\n# 四、{gesture}"
         # Single cached system block. Prompt caching needs at least ~1024
         # tokens; the character corpus is well above that.
         return [
@@ -499,6 +752,8 @@ class CharacterEngine:
         text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
         raw_reply = "".join(text_parts).strip()
         cleaned_reply, mood = parse_mood_tag(raw_reply)
+        cleaned_reply, gesture_plan = parse_gestures_tag(cleaned_reply)
+        gesture_plan, tagged_reply = attach_gesture_segments(cleaned_reply, gesture_plan)
 
         # Persist user (raw) and assistant (cleaned, with mood as meta).
         conversation.add("user", user_message)
@@ -513,6 +768,8 @@ class CharacterEngine:
             retrieved=retrieved,
             retrieved_history=retrieved_history,
             mood=mood,
+            gesture_plan=gesture_plan,
+            tagged_reply=tagged_reply,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
@@ -545,10 +802,30 @@ class CharacterEngine:
         header_buf = ""
         mood: dict | None = None
         cleaned_parts: list[str] = []
+        tail_buf = ""
 
         def _emit_header(buf: str):
             """Parse the mood tag off `buf`; return (mood, cleaned_visible_text)."""
             return parse_mood_tag(buf)
+
+        def _push_body(text: str):
+            """Yield visible deltas while holding possible trailing metadata tags."""
+            nonlocal tail_buf
+            if not text:
+                return
+            if tail_buf:
+                tail_buf += text
+                return
+            tag_start = text.find("[")
+            if tag_start >= 0:
+                visible = text[:tag_start]
+                tail_buf = text[tag_start:]
+                if visible:
+                    cleaned_parts.append(visible)
+                    yield {"type": "delta", "text": visible}
+                return
+            cleaned_parts.append(text)
+            yield {"type": "delta", "text": text}
 
         with self.client.messages.stream(
             model=self.model,
@@ -567,25 +844,30 @@ class CharacterEngine:
                         cleaned, mood = _emit_header(header_buf)
                         header_done = True
                         yield {"type": "mood", "mood": mood}
-                        if cleaned:
-                            cleaned_parts.append(cleaned)
-                            yield {"type": "delta", "text": cleaned}
+                        for ev in _push_body(cleaned):
+                            yield ev
                     continue
-                cleaned_parts.append(delta)
-                yield {"type": "delta", "text": delta}
+                for ev in _push_body(delta):
+                    yield ev
 
             # Stream finished. If we never saw a newline (single-line reply or
             # a dropped tag), parse whatever we buffered now.
             if not header_done:
                 cleaned, mood = _emit_header(header_buf)
                 yield {"type": "mood", "mood": mood}
-                if cleaned:
-                    cleaned_parts.append(cleaned)
-                    yield {"type": "delta", "text": cleaned}
+                for ev in _push_body(cleaned):
+                    yield ev
 
             final = stream.get_final_message()
 
+        gesture_plan: list[dict] = []
+        if tail_buf:
+            tail_clean, gesture_plan = parse_gestures_tag(tail_buf)
+            if tail_clean:
+                cleaned_parts.append(tail_clean)
+                yield {"type": "delta", "text": tail_clean}
         cleaned_full = "".join(cleaned_parts).strip()
+        gesture_plan, tagged_reply = attach_gesture_segments(cleaned_full, gesture_plan)
 
         # Reached only on normal completion — safe to persist.
         conversation.add("user", user_message)
@@ -600,6 +882,8 @@ class CharacterEngine:
             "mood": mood,
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
+            "gesture_plan": gesture_plan,
+            "tagged_reply": tagged_reply,
             "usage": {
                 "input_tokens": getattr(usage, "input_tokens", 0) or 0,
                 "output_tokens": getattr(usage, "output_tokens", 0) or 0,

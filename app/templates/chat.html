@@ -385,6 +385,63 @@
     font-size: 14.5px;
     line-height: 1.7;
   }
+  .gesture-feedback {
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px dashed rgba(200,181,145,0.75);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink-faint);
+    font-size: 11.5px;
+  }
+  .gesture-feedback .gesture-summary {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .gesture-tag {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--accent);
+    background: rgba(122,59,42,0.08);
+    border: 1px solid rgba(122,59,42,0.22);
+    border-radius: 10px;
+    padding: 1px 7px;
+  }
+  .gesture-tag.empty {
+    color: var(--ink-faint);
+    background: rgba(176,132,56,0.08);
+    border-color: rgba(176,132,56,0.24);
+  }
+  .gesture-votes {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .gesture-vote {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    background: rgba(255,253,247,0.72);
+    color: var(--ink-soft);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .gesture-vote:hover { border-color: var(--accent); color: var(--accent); }
+  .gesture-vote.selected {
+    border-color: var(--accent);
+    background: rgba(122,59,42,0.10);
+    color: var(--accent);
+  }
+  .gesture-vote:disabled { opacity: 0.55; cursor: default; }
 
   .state-bar {
     display: flex; align-items: center; gap: 10px;
@@ -1281,6 +1338,7 @@ let state = {
   currentSession: null,
   sessions: [],
   sending: false,
+  initPromise: null,
 };
 
 // Per-browser id so that, on a shared public URL, each tester only sees their
@@ -1617,6 +1675,7 @@ function appendMessage(role, content, opts = {}) {
   } else {
     contentEl.textContent = content;
   }
+  if (role === 'assistant') wrap.__cleanText = content || '';
   // Assistant messages get a 🔊 replay button that (re)synthesizes Lina's voice
   // for that line on demand — works for live, text, and history messages.
   if (role === 'assistant') {
@@ -1631,6 +1690,82 @@ function appendMessage(role, content, opts = {}) {
   root.appendChild(wrap);
   scrollToBottom();
   return wrap;
+}
+
+function renderGestureFeedback(wrap, payload = {}) {
+  if (!wrap || !wrap.classList.contains('assistant')) return;
+  const bubble = wrap.querySelector('.bubble');
+  if (!bubble) return;
+  bubble.querySelectorAll('.gesture-feedback').forEach(el => el.remove());
+
+  const plan = Array.isArray(payload.gesture_plan) ? payload.gesture_plan : [];
+  const gesture = plan.length ? plan[0] : null;
+  const row = document.createElement('div');
+  row.className = 'gesture-feedback';
+
+  const summary = document.createElement('div');
+  summary.className = 'gesture-summary';
+  if (gesture) {
+    const tag = document.createElement('span');
+    tag.className = 'gesture-tag';
+    tag.textContent = gesture.action || '';
+    summary.appendChild(tag);
+    const label = document.createElement('span');
+    const segment = Number.isInteger(gesture.segment_index) ? ` · 片段 ${gesture.segment_index}` : '';
+    label.textContent = `${gesture.label || '动作'}${segment}`;
+    summary.appendChild(label);
+  } else {
+    const tag = document.createElement('span');
+    tag.className = 'gesture-tag empty';
+    tag.textContent = '无动作';
+    summary.appendChild(tag);
+    const label = document.createElement('span');
+    label.textContent = '本轮未触发动作';
+    summary.appendChild(label);
+  }
+
+  const votes = document.createElement('div');
+  votes.className = 'gesture-votes';
+  const feedbackPayload = {
+    session_id: payload.session_id || state.currentSession || '',
+    reply: payload.reply || '',
+    tagged_reply: payload.tagged_reply || payload.reply || '',
+    gesture_plan: plan,
+  };
+  for (const [rating, text, title] of [
+    ['up', '赞', '这个动作合适'],
+    ['down', '踩', '这个动作不合适'],
+  ]) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'gesture-vote';
+    btn.textContent = text;
+    btn.title = title;
+    btn.addEventListener('click', () => submitGestureFeedback(row, btn, rating, feedbackPayload));
+    votes.appendChild(btn);
+  }
+
+  row.appendChild(summary);
+  row.appendChild(votes);
+  bubble.appendChild(row);
+  scrollToBottom();
+}
+
+async function submitGestureFeedback(row, btn, rating, payload) {
+  const buttons = row.querySelectorAll('.gesture-vote');
+  buttons.forEach(b => { b.disabled = true; b.classList.remove('selected'); });
+  try {
+    await api('/api/gesture-feedback', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, rating }),
+    });
+    btn.classList.add('selected');
+    row.dataset.rating = rating;
+    toast('已记录动作反馈。');
+  } catch (e) {
+    buttons.forEach(b => { b.disabled = false; });
+    toast('反馈失败：' + e.message);
+  }
 }
 
 function setBubbleMood(wrap, meta) {
@@ -1708,6 +1843,7 @@ function escapeHtml(s) {
 
 async function send() {
   if (state.sending) return;
+  if (state.initPromise) await state.initPromise;
   if (!state.ready) { toast('请先在右上角连接 API Key。'); return; }
   if (!state.currentSession) { await newSession(); }
 
@@ -1728,8 +1864,16 @@ async function send() {
       method: 'POST',
       body: JSON.stringify({ session_id: state.currentSession, message: text }),
     });
-    typingEl.querySelector('.content').textContent = data.reply;
+    const displayReply = data.tagged_reply || data.reply || '';
+    typingEl.__cleanText = data.reply || displayReply;
+    typingEl.querySelector('.content').textContent = displayReply;
     setBubbleMood(typingEl, data.mood);
+    renderGestureFeedback(typingEl, {
+      session_id: state.currentSession,
+      reply: data.reply || '',
+      tagged_reply: displayReply,
+      gesture_plan: data.gesture_plan || [],
+    });
     renderStateBar(data.mood);
     renderForcedPill(data.forced_state);  // None after consumption clears the pill
     state.lastMeta = data.mood || state.lastMeta;
@@ -2559,7 +2703,7 @@ function playReplay(url, btn) {
 }
 
 async function replayMessage(wrap, btn) {
-  const text = (wrap.querySelector('.content')?.textContent || '').trim();
+  const text = (wrap.__cleanText || wrap.querySelector('.content')?.textContent || '').trim();
   if (!text) return;
   if (voice.modelState !== 'ready') {
     toast(voice.modelState === 'loading' ? '语音模型加载中，请稍候…' : '语音模型未就绪，无法朗读。');
@@ -2590,6 +2734,7 @@ async function replayMessage(wrap, btn) {
 
 // ---- Recording ----
 async function startRecording() {
+  if (state.initPromise) await state.initPromise;
   if (!state.ready) { toast('请先连接 API Key。'); return; }
   // getUserMedia only exists in a secure context (https:// or localhost). Over
   // plain http from another machine the API is absent and no prompt appears —
@@ -2718,7 +2863,17 @@ async function streamVoiceReply(text) {
         } else if (ev.type === 'audio') {
           enqueueAudio(ev.audio, ev.mime);
         } else if (ev.type === 'done') {
+          const cleanText = ev.text || acc;
+          const displayReply = ev.tagged_reply || cleanText;
+          assistantEl.__cleanText = cleanText;
+          contentEl.textContent = displayReply;
           if (ev.mood) { setBubbleMood(assistantEl, ev.mood); renderStateBar(ev.mood); }
+          renderGestureFeedback(assistantEl, {
+            session_id: state.currentSession,
+            reply: cleanText,
+            tagged_reply: displayReply,
+            gesture_plan: ev.gesture_plan || [],
+          });
           renderForcedPill(ev.forced_state || null);
           renderChunks(ev.retrieved, ev.retrieved_history);
           renderUsage(ev.usage);
@@ -2776,7 +2931,7 @@ async function onMicClick() {
 
 $('mic-btn').addEventListener('click', onMicClick);
 
-(async function init() {
+state.initPromise = (async function init() {
   await refreshStatus();
   await loadVersions();   // populate the per-session dropdown
   await loadSessions();
@@ -2792,7 +2947,7 @@ $('mic-btn').addEventListener('click', onMicClick);
   // until they're ready so the status pill flips to 就绪 on its own.
   const vst = await voiceRefreshStatus();
   if (vst === 'loading') pollVoiceUntilReady();
-})();
+})().finally(() => { state.initPromise = null; });
 </script>
 </body>
 </html>

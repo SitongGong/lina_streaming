@@ -9,3 +9,4 @@ conversations/*.json
 .claude/settings.local.json
 prompt_overrides/
 certs/
+gesture_feedback/

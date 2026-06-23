@@ -58,6 +58,7 @@ PROMPT_COMPONENTS: list[tuple[str, str, str, str]] = [
     ("others.md", "其他角色", "file", "RAG 检索。"),
     ("BEHAVIOR_RULES", "行为规则", "code", "代码常量。系统提示里的核心约束。"),
     ("MOOD_FORMAT_SPEC", "情绪标记格式", "code", "代码常量。决定 [mood: …] 的输出格式。"),
+    ("GESTURE_FORMAT_SPEC", "动作标记格式", "code", "代码常量。决定隐藏 [gestures: …] 动作 tag 输出格式。"),
     ("SYSTEM_PROMPT_TEMPLATE", "系统提示模板", "code",
      "代码常量。包含占位符 {core_text} / {behavior_rules} / {mood_format_spec}。"),
 ]
@@ -66,6 +67,8 @@ _PROMPT_KEYS = {k for k, _, _, _ in PROMPT_COMPONENTS}
 OVERRIDES_DIR = PROJECT_ROOT / "prompt_overrides"
 OVERRIDES_FILE = OVERRIDES_DIR / "current.json"
 VERSIONS_DIR = OVERRIDES_DIR / "versions"
+GESTURE_FEEDBACK_DIR = PROJECT_ROOT / "gesture_feedback"
+GESTURE_FEEDBACK_FILE = GESTURE_FEEDBACK_DIR / "feedback.jsonl"
 
 _overrides: dict[str, str] = {}
 _VERSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
@@ -276,6 +279,7 @@ def _default_value(key: str) -> str:
     return {
         "BEHAVIOR_RULES": character_mod.BEHAVIOR_RULES,
         "MOOD_FORMAT_SPEC": character_mod.MOOD_FORMAT_SPEC,
+        "GESTURE_FORMAT_SPEC": character_mod.GESTURE_FORMAT_SPEC,
         "SYSTEM_PROMPT_TEMPLATE": character_mod.SYSTEM_PROMPT_TEMPLATE,
     }.get(key, "")
 
@@ -756,6 +760,8 @@ def create_app() -> Flask:
             {
                 "ok": True,
                 "reply": result.text,
+                "tagged_reply": result.tagged_reply,
+                "gesture_plan": result.gesture_plan,
                 "mood": result.mood,
                 "prompt_version_id": conv.prompt_version_id,
                 "prompt_version_fallback": "current" if pinned_version_missing else None,
@@ -776,6 +782,27 @@ def create_app() -> Flask:
                 },
             }
         )
+
+    @app.route("/api/gesture-feedback", methods=["POST"])
+    def gesture_feedback():
+        cid = _client_id() or _ANON_CLIENT
+        data = request.get_json(force=True, silent=True) or {}
+        rating = (data.get("rating") or "").strip()
+        if rating not in {"up", "down"}:
+            return jsonify({"ok": False, "error": "rating 必须是 up 或 down"}), 400
+        record = {
+            "timestamp": time.time(),
+            "client_id": cid,
+            "session_id": (data.get("session_id") or "").strip(),
+            "rating": rating,
+            "reply": data.get("reply") if isinstance(data.get("reply"), str) else "",
+            "tagged_reply": data.get("tagged_reply") if isinstance(data.get("tagged_reply"), str) else "",
+            "gesture_plan": data.get("gesture_plan") if isinstance(data.get("gesture_plan"), list) else [],
+        }
+        GESTURE_FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        with GESTURE_FEEDBACK_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return jsonify({"ok": True})
 
     # ---------- Voice pipeline (local ASR + streaming TTS) ----------
 
@@ -924,6 +951,8 @@ def create_app() -> Flask:
                                 "type": "done",
                                 "mood": ev.get("mood"),
                                 "text": ev.get("text", ""),
+                                "tagged_reply": ev.get("tagged_reply", ""),
+                                "gesture_plan": ev.get("gesture_plan") or [],
                                 "forced_state": conv.forced_state,  # None after one-shot consumption
                                 "usage": ev.get("usage"),
                                 "retrieved": [
