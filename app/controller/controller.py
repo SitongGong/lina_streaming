@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 # (and filled with its default) rather than blowing the whole budget.
 _CONTROLLER_TIMEOUT = 6.0  # total fan-out deadline (seconds)
 _ADVISOR_TIMEOUT = 5.0  # per-advisor timeout (must be < total)
+# 推理力度（reasoning_effort）：单字段/小判定不需要深度推理，用最低档求快。
+# 注意：旧版 GPT-5/5.1 支持 'minimal'，但 GPT-5.2+ 已移除该值（只接受 none/low/
+# medium/high/xhigh），传 'minimal' 会 400 报错→全程 fallback。故默认用 'low'
+# （新老模型都接受；走 Anthropic 兼容层时该参数会被 pop 掉，对 Claude 无影响）。
+# 可用 LINA_REASONING_EFFORT 覆盖。
+_REASONING_EFFORT = (os.environ.get("LINA_REASONING_EFFORT") or "low").strip() or "low"
 # Self-facts updates run in a BACKGROUND thread (not the latency-sensitive
 # per-turn path) and regenerate the full facts JSON (up to 800 tokens), which
 # grows as facts accumulate. They need a much more generous deadline than the
@@ -200,7 +206,7 @@ class LinaController:
                     model=self._model_name,
                     messages=[{"role": "user", "content": prompt}],
                     max_completion_tokens=800,
-                    reasoning_effort="minimal",
+                    reasoning_effort=_REASONING_EFFORT,
                     response_format={"type": "json_object"},
                 ),
                 # Background task → generous deadline, not the per-turn 5s budget.
@@ -288,7 +294,7 @@ class LinaController:
                         model=self._model_name,
                         messages=[{"role": "user", "content": prompt}],
                         max_completion_tokens=200,
-                        reasoning_effort="minimal",
+                        reasoning_effort=_REASONING_EFFORT,
                         response_format={"type": "json_object"},
                     ),
                     timeout=deadline,
@@ -356,7 +362,7 @@ class LinaController:
                     model=self._model_name,
                     messages=[{"role": "user", "content": prompt}],
                     max_completion_tokens=900,
-                    reasoning_effort="minimal",
+                    reasoning_effort=_REASONING_EFFORT,
                     response_format={"type": "json_object"},
                 ),
                 timeout=float(os.environ.get("LINA_SELF_FACTS_TIMEOUT") or _SELF_FACTS_TIMEOUT),
@@ -434,7 +440,7 @@ class LinaController:
                     model=self._model_name,
                     messages=[{"role": "user", "content": prompt}],
                     max_completion_tokens=512,
-                    reasoning_effort="minimal",
+                    reasoning_effort=_REASONING_EFFORT,
                     response_format={"type": "json_object"},
                 ),
                 timeout=self._advisor_timeout,

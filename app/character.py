@@ -127,6 +127,41 @@ SEGMENT_PROTOCOL_SPEC = _load_main_prompt("segment_protocol_spec.txt")
 SYSTEM_PROMPT_TEMPLATE = _load_main_prompt("system_prompt_template.txt")
 
 
+# behavior_rules 按块拆分（prompts/main/behavior_blocks/）：base 常驻进缓存块，
+# 其余按本轮场景注入，减短每轮 prompt。块文件缺失则回退用整份 BEHAVIOR_RULES。
+def _load_behavior_block(name: str) -> str:
+    fp = _MAIN_PROMPTS_DIR / "behavior_blocks" / f"{name}.txt"
+    try:
+        return fp.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+_BEHAVIOR_BASE = _load_behavior_block("base")
+_BEHAVIOR_SCENE_BLOCKS = {
+    "continuation_skills": _load_behavior_block("continuation_skills"),
+    "empathy_scenes": _load_behavior_block("empathy_scenes"),
+    "humor": _load_behavior_block("humor"),
+}
+# 拆分是否可用：base 块存在才启用按场景注入；否则回退整份（安全兜底）。
+_BEHAVIOR_SPLIT_OK = bool(_BEHAVIOR_BASE.strip())
+
+# 规则检索（EVEROS_RULES=1）：behavior 全走检索、mood 情绪表走检索，每轮按用户话
+# 注入 top-k 条；缓存块里 behavior 留空、mood 只留「格式头+三条铁律」常驻（机制底线，
+# 漏检会让输出格式崩）。检索关闭时一切照旧（整份注入）。
+_RULES_RETRIEVAL_ON = _os.environ.get("EVEROS_RULES", "").strip() in ("1", "true", "True")
+
+
+def _mood_format_head() -> str:
+    """情绪标记格式说明 + 三条铁律（到「情绪表」前），机制底线，常驻。"""
+    import re as _re
+    head = _re.split(r"\*\*情绪表\*\*", MOOD_FORMAT_SPEC, maxsplit=1)[0].strip()
+    return head or MOOD_FORMAT_SPEC
+
+
+_MOOD_HEAD = _mood_format_head()
+
+
 def _block_text(block) -> str:
     """从 system block / message content 里抽出纯文本（兼容 str 与 {type,text} dict / list）。"""
     if isinstance(block, str):
@@ -242,6 +277,8 @@ class CharacterEngine:
         # CORE 人设（self.rag.core_text）不受影响，仍全量进 prompt。
         from .persona_memory import PersonaMemory
         self.persona_memory = PersonaMemory()
+        from .rules_memory import RulesMemory
+        self.rules_memory = RulesMemory()
         # 日记/谈资两级检索（本地 EverOS）。由 plan.need_diary 门控（controller 判定
         # 本轮该调莉娜生活经历时才检索）。未启用（EVEROS_DIARY 未置）则 enabled=False。
         from .diary_memory import DiaryMemory
@@ -262,8 +299,17 @@ class CharacterEngine:
         self._system_blocks = self._build_system_blocks()
 
     def _build_system_blocks(self) -> list[dict]:
-        behavior = self.overrides.get("BEHAVIOR_RULES", BEHAVIOR_RULES)
-        mood = self.overrides.get("MOOD_FORMAT_SPEC", MOOD_FORMAT_SPEC)
+        # 规则检索启用时：缓存块里 behavior 留空（全走检索，由动态块按当前话注入
+        # top-k 条），mood 只留「格式头+三条铁律」常驻（机制底线）。网页 override 了
+        # 对应 KEY 时尊重 override（整份），不走检索。
+        if _RULES_RETRIEVAL_ON and "BEHAVIOR_RULES" not in self.overrides:
+            behavior = ""
+        else:
+            behavior = self.overrides.get("BEHAVIOR_RULES", BEHAVIOR_RULES)
+        if _RULES_RETRIEVAL_ON and "MOOD_FORMAT_SPEC" not in self.overrides:
+            mood = _MOOD_HEAD
+        else:
+            mood = self.overrides.get("MOOD_FORMAT_SPEC", MOOD_FORMAT_SPEC)
         template = self.overrides.get("SYSTEM_PROMPT_TEMPLATE", SYSTEM_PROMPT_TEMPLATE)
         try:
             prompt = template.format(
@@ -422,18 +468,55 @@ class CharacterEngine:
             if (not c.source.endswith(".md")) or (c.source in allowed)
         ]
 
-    def _build_dynamic_system_blocks(self, plan: LinaPromptPlan) -> list[dict]:
+    def _build_dynamic_system_blocks(self, plan: LinaPromptPlan, rules_query: str = "") -> list[dict]:
         """Build optional second system block from the controller plan.
 
         Returns an empty list when there's nothing dynamic to add (caller
         then uses just the cached block — the pre-controller payload)."""
-        if self._composer is None:
-            return []
-        bundle = self._composer.compose(plan)
-        if not bundle.tail_text.strip():
+        parts: list[str] = []
+        if self._composer is not None:
+            bundle = self._composer.compose(plan)
+            if bundle.tail_text.strip():
+                parts.append(bundle.tail_text)
+        # 规则检索：按本轮用户话语义检索 behavior top-8 + mood 情绪 top-6 注入
+        # （EVEROS_RULES=1 且未 override 整份时）。缓存块里 behavior 已留空、mood 仅留
+        # 格式头，所以这里把「本轮用得上的」规则补进来，省掉全量 2 万字。
+        if _RULES_RETRIEVAL_ON and rules_query.strip() and self.rules_memory.enabled:
+            if "BEHAVIOR_RULES" not in self.overrides:
+                bh = self.rules_memory.retrieve_behavior(rules_query, k=8)
+                if bh.strip():
+                    parts.append("# 行为规则（本轮相关，必须遵守）\n\n" + bh)
+            if "MOOD_FORMAT_SPEC" not in self.overrides:
+                md = self.rules_memory.retrieve_mood(rules_query, k=6)
+                if md.strip():
+                    parts.append("# 情绪表（本轮可能用到的情绪）\n\n" + md)
+        if not parts:
             return []
         # Second block is NOT cache_control'd: it changes per turn.
-        return [{"type": "text", "text": bundle.tail_text}]
+        return [{"type": "text", "text": "\n\n".join(parts)}]
+
+    @staticmethod
+    def _scene_behavior_blocks(plan: LinaPromptPlan) -> list[str]:
+        """[已弃用] 旧的按场景挑 behavior_blocks 逻辑，规则检索启用后不再调用。
+        没有 controller（plan 为默认）时，为安全起见全注入（等价整份）。"""
+        if plan is None:
+            return ["continuation_skills", "empathy_scenes", "humor"]
+        picked: list[str] = []
+        # 续聊技巧：本轮要勾话头/给细节/引用历史时。
+        if getattr(plan, "hook_concrete_example", False) or getattr(plan, "hook_callback", False) \
+                or getattr(plan, "hook_history_recall", False):
+            picked.append("continuation_skills")
+        # 共情/关系场景应对：安抚或关系回访时。
+        if getattr(plan, "module_user_vent", False) or getattr(plan, "module_relationship_recall", False):
+            picked.append("empathy_scenes")
+        # 幽默：轻松/兴奋点场景，或语气偏轻松调侃时。
+        tone = (getattr(plan, "tone_hint", "") or "")
+        # 幽默：兴奋点场景，或明确轻松/调侃语气（不含「自然」——它几乎每轮都有，会失效）。
+        if getattr(plan, "module_world_immersion", False) or any(
+            k in tone for k in ("轻松", "雀跃", "调侃", "俏皮", "幽默")
+        ):
+            picked.append("humor")
+        return picked
 
     def _build_user_content(
         self,
@@ -835,7 +918,7 @@ class CharacterEngine:
             }
         ]
         # 5) Two-segment system: cached block + plan-derived tail.
-        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan, rules_query=user_message)
         return {
             "retrieved": retrieved,
             "retrieved_history": retrieved_history,
@@ -1292,7 +1375,7 @@ class CharacterEngine:
         )
         api_messages = prior + [{"role": "user", "content": composed_instruction}]
 
-        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan, rules_query=instruction)
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -1392,7 +1475,7 @@ class CharacterEngine:
         composed = self._build_user_content(instruction, [], [], prior_mood)
         api_messages = prior + [{"role": "user", "content": composed}]
 
-        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan)
+        system_blocks = self._system_blocks + self._build_dynamic_system_blocks(plan, rules_query=instruction)
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,

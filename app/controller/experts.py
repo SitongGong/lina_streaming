@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,11 @@ from typing import Any, Callable, Optional
 
 from ._prompts import load_prompt
 from .schema import LinaTurnContext
+
+# 推理力度：见 controller.py 同名常量的说明。GPT-5.2+ 不再支持 'minimal'
+# （只接受 none/low/medium/high/xhigh），故默认 'low'；走 Anthropic 兼容层时
+# 该参数会被 pop，对 Claude 无影响。可用 LINA_REASONING_EFFORT 覆盖。
+REASONING_EFFORT = (os.environ.get("LINA_REASONING_EFFORT") or "low").strip() or "low"
 
 
 logger = logging.getLogger(__name__)
@@ -172,7 +178,7 @@ class _AdvisorBase:
                     #   关掉推理既快又省，content 直接出 JSON。
                     # - 不传 temperature：GPT-5 系只接受默认值。
                     max_completion_tokens=512,
-                    reasoning_effort="minimal",
+                    reasoning_effort=REASONING_EFFORT,
                     response_format={"type": "json_object"},
                 ),
                 timeout=self._timeout,

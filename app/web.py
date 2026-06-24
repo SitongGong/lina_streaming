@@ -261,11 +261,21 @@ def _build_original_controller() -> LinaController:
     if _controller is None:
         with _controller_lock:
             if _controller is None:
-                cfg = resolve_controller_settings()
-                _controller = build_default_controller(
-                    api_key=cfg["api_key"], model=cfg["model"],
-                    base_url=cfg["base_url"], provider=cfg["provider"],
-                )
+                # 本地提速测试开关：LINA_CONTROLLER_OPENAI=1 时 controller 走真 OpenAI 的
+                # gpt-5-mini（默认关，线上仍走 Anthropic Haiku）。注意：开启会把对话内容
+                # 发给 OpenAI，仅用于本地实验，勿在生产默认开启。
+                if os.environ.get("LINA_CONTROLLER_OPENAI", "").strip() in ("1", "true", "True"):
+                    _controller = build_default_controller(
+                        api_key=os.environ.get("OPENAI_API_KEY"),
+                        model=(os.environ.get("LINA_CONTROLLER_MODEL") or "gpt-5-mini"),
+                        provider="openai",
+                    )
+                else:
+                    cfg = resolve_controller_settings()
+                    _controller = build_default_controller(
+                        api_key=cfg["api_key"], model=cfg["model"],
+                        base_url=cfg["base_url"], provider=cfg["provider"],
+                    )
     return _controller
 
 

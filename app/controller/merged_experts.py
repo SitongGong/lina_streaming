@@ -19,7 +19,7 @@ import asyncio
 import time
 from typing import Any
 
-from .experts import build_lina_advisors, _parse_json_object, _render_history
+from .experts import build_lina_advisors, _parse_json_object, _render_history, REASONING_EFFORT
 from .schema import LinaTurnContext
 
 
@@ -138,7 +138,7 @@ async def _run_group(client, model: str, timeout: float, group_fields: list[str]
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=700,   # 多字段，给宽一点
-                reasoning_effort="minimal",
+                reasoning_effort=REASONING_EFFORT,
                 response_format={"type": "json_object"},
             ),
             timeout=timeout,
